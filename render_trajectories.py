@@ -5,6 +5,7 @@ import json
 import math
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from tqdm import tqdm
 
 
 def render_video(path, scene, env, output):
@@ -64,7 +65,11 @@ def render_video(path, scene, env, output):
         # Publish only complete videos, including when replacing an existing export.
         with TemporaryDirectory(dir=output.parent) as temporary:
             video = Path(temporary) / output.name
-            with writer.saving(fig, str(video), dpi=100):
+            with (
+                tqdm(total=len(joints)+round(fps),desc=f'Frames {path.stem}',
+                     unit='frame',leave=False,dynamic_ncols=True) as progress,
+                writer.saving(fig, str(video), dpi=100),
+            ):
                 for step, xy in enumerate(joints):
                     arm.set_data(xy[:, 0], xy[:, 1])
                     trail.set_data(tip[:step + 1, 0], tip[:step + 1, 1])
@@ -75,9 +80,11 @@ def render_video(path, scene, env, output):
                         f"t = {step * dt:.2f} s | {status}"
                     )
                     writer.grab_frame()
+                    progress.update(1)
                 # Keep the final pose and outcome visible for one second.
                 for _ in range(round(fps)):
                     writer.grab_frame()
+                    progress.update(1)
             video.replace(output)
     finally:
         plt.close(fig)
@@ -125,17 +132,18 @@ def main():
     if not math.isfinite(dt) or dt <= 0:
         parser.error("env.timestep * env.substeps must be finite and positive")
 
-    for index, path in enumerate(paths, start=1):
-        output = run / "videos" / path.relative_to(data).with_suffix(".mp4")
-        if output.exists() and not args.overwrite:
-            print(f"[{index}/{len(paths)}] Skip existing {output}", flush=True)
-            continue
-        with np.load(path, allow_pickle=False) as episode:
-            scene_id = episode["scene_id"].item()
-        if scene_id not in scenes:
-            parser.error(f"{path}: scene {scene_id!r} is missing from scenes.json")
-        render_video(path, scenes[scene_id], env, output)
-        print(f"[{index}/{len(paths)}] {output}", flush=True)
+    with tqdm(paths,desc="Export videos",unit="video",dynamic_ncols=True) as progress:
+        for path in progress:
+            output = run / "videos" / path.relative_to(data).with_suffix(".mp4")
+            if output.exists() and not args.overwrite:
+                tqdm.write(f"Skip existing {output}")
+                continue
+            with np.load(path, allow_pickle=False) as episode:
+                scene_id = episode["scene_id"].item()
+            if scene_id not in scenes:
+                parser.error(f"{path}: scene {scene_id!r} is missing from scenes.json")
+            render_video(path, scenes[scene_id], env, output)
+            tqdm.write(str(output))
 
 
 if __name__ == "__main__":

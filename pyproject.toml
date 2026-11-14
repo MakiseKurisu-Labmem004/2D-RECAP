@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 name = "minimal-recap"
 version = "0.1.0"
 requires-python = ">=3.10"
-dependencies = ["numpy", "mujoco>=3.1", "gymnasium", "torch>=2.2", "matplotlib", "PyYAML"]
+dependencies = ["numpy", "mujoco>=3.1", "gymnasium", "torch>=2.2", "matplotlib", "PyYAML", "tqdm>=4.66"]
 [project.optional-dependencies]
 test = ["pytest"]
 [project.scripts]

@@ -1,5 +1,6 @@
 import heapq
 import numpy as np
+from tqdm import tqdm
 from .env import clearance, points, ObstacleReach2D
 
 
@@ -82,9 +83,11 @@ class ScenarioGenerator:
     def __init__(self,cfg): self.cfg=cfg; self.rejections={}
     def generate(self,split,count,seed):
         rng=np.random.default_rng(seed); env=ObstacleReach2D(self.cfg['env']); accepted=[]
+        progress=tqdm(total=count,desc=f'Generate {split}',unit='scene',dynamic_ncols=True)
         try:
             for attempt in range(self.cfg['planner']['max_attempts']):
                 if len(accepted)==count: return accepted
+                progress.set_postfix(attempt=attempt+1)
                 q0=rng.uniform([-2.,-.8],[2.,2.4])
                 angle=rng.uniform(-1.3,-.15) if split in ('goal_ood','composition_ood') else rng.uniform(.15,1.3)
                 radial=rng.uniform(.45,.85)
@@ -112,7 +115,11 @@ class ScenarioGenerator:
                         scene['metrics']=dict(steps=len(ep['reward']),joint_path_length=length,
                             ee_path_length=float(np.linalg.norm(np.diff(np.array([points(q)[-1] for q in ep['qpos']]),axis=0),axis=1).sum()),
                             detour_ratio=ratio,min_clearance=gap,difficulty=difficulty)
-                        accepted.append((scene,ep)); reason='accepted'; break
+                        accepted.append((scene,ep)); reason='accepted'
+                        progress.update(1)
+                        break
                 self.rejections[reason]=self.rejections.get(reason,0)+1
             raise RuntimeError(f'Accepted {len(accepted)}/{count}; rejection counts: {self.rejections}')
-        finally: env.close()
+        finally:
+            progress.close()
+            env.close()

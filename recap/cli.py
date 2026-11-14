@@ -5,6 +5,7 @@ import random
 import numpy as np
 import torch
 import yaml
+from tqdm import tqdm
 from .env import ObstacleReach2D
 from .planning import ScenarioGenerator,rollout
 from .models import Model,returns,advantage,distribution_targets
@@ -15,7 +16,9 @@ def save_json(path,obj):
 
 
 def episodes(root,split,source='expert'):
-    return [dict(np.load(p,allow_pickle=False)) for p in sorted((root/'data'/split/source).glob('*.npz'))]
+    paths=sorted((root/'data'/split/source).glob('*.npz'))
+    with tqdm(paths,desc=f'Load {split}/{source}',unit='episode',leave=False,dynamic_ncols=True) as progress:
+        return [dict(np.load(p,allow_pickle=False)) for p in progress]
 
 
 def store(root,split,source,ep):
@@ -41,12 +44,13 @@ def policy(model):
 
 def annotate(eps,model,cfg):
     scale=cfg['env']['horizon']+149
-    for ep in eps:
-        with torch.no_grad():
-            ep['value_prediction']=model.value(torch.tensor(ep['observation'],device=device(cfg))).cpu().numpy()
-            nv=model.value(torch.tensor(ep['next_observation'],device=device(cfg))).cpu().numpy()
-        ep['mc_return']=returns(ep['reward'],scale)
-        ep['td_advantage']=advantage(ep['reward'],ep['value_prediction'],nv,cfg['train']['n_step'],scale)
+    with tqdm(eps,desc='Value/advantage',unit='episode',leave=False,dynamic_ncols=True) as progress:
+        for ep in progress:
+            with torch.no_grad():
+                ep['value_prediction']=model.value(torch.tensor(ep['observation'],device=device(cfg))).cpu().numpy()
+                nv=model.value(torch.tensor(ep['next_observation'],device=device(cfg))).cpu().numpy()
+            ep['mc_return']=returns(ep['reward'],scale)
+            ep['td_advantage']=advantage(ep['reward'],ep['value_prediction'],nv,cfg['train']['n_step'],scale)
     return eps
 
 
@@ -66,9 +70,10 @@ def fit(root,kind,cfg,resume=False):
         adv=np.concatenate([ep['td_advantage'] for ep in train])
         if tc['selection']=='quantile': threshold=float(np.quantile(adv,tc['quantile']))
         for split,eps in [('train',train),('validation',val)]:
-            for ep in eps:
-                ep['advantage_indicator']=ep['td_advantage']>threshold
-                store(root,split,'annotated',ep)
+            with tqdm(eps,desc=f'Label {split}',unit='episode',leave=False,dynamic_ncols=True) as progress:
+                for ep in progress:
+                    ep['advantage_indicator']=ep['td_advantage']>threshold
+                    store(root,split,'annotated',ep)
         save_json(root/'diagnostics.json',dict(transitions=len(adv),positive_fraction=float((adv>0).mean()),
             selected_fraction=float((adv>threshold).mean()),threshold=threshold,
             successful_rollouts=sum(bool(e['success'][-1]) for e in episodes(root,'train','rollout')),
@@ -96,19 +101,24 @@ def fit(root,kind,cfg,resume=False):
         condition=l.long()
         if training: condition=torch.where(torch.rand(len(a),device=dev)<tc['dropout'],null,condition)
         return model.nll(a,b,null).mean()+tc['alpha']*(l*model.nll(a,b,condition)).mean()+tc['low_weight']*((1-l)*model.nll(a,b,condition)).mean()
-    for epoch in range(start,tc['epochs']):
-        model.train(); total=0.
-        for ids in torch.randperm(len(x),device=dev).split(tc['batch_size']):
-            optimizer.zero_grad(); err=loss(x[ids],y[ids],labels[ids],True); err.backward(); optimizer.step(); total+=err.item()*len(ids)
-        model.eval()
-        with torch.no_grad(): validation=loss(vx,vy,vl,False).item()
-        history.append(dict(epoch=epoch,train=total/len(x),validation=validation))
-        improved=validation<best; best=min(best,validation)
-        ck=dict(model=model.state_dict(),optimizer=optimizer.state_dict(),epoch=epoch,best=best,history=history,
-                rng=torch.get_rng_state(),cuda_rng=torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,config=cfg)
-        torch.save(ck,last)
-        if improved: torch.save(ck,root/f'{kind}.pt')
-        print(kind,history[-1],flush=True)
+    with tqdm(range(start,tc['epochs']),total=tc['epochs'],initial=start,
+              desc=f'Train {kind}',unit='epoch',dynamic_ncols=True) as epochs:
+        for epoch in epochs:
+            model.train(); total=0.
+            batches=torch.randperm(len(x),device=dev).split(tc['batch_size'])
+            with tqdm(batches,desc=f'{kind} epoch {epoch+1}',unit='batch',leave=False,dynamic_ncols=True) as progress:
+                for ids in progress:
+                    optimizer.zero_grad(); err=loss(x[ids],y[ids],labels[ids],True); err.backward(); optimizer.step(); total+=err.item()*len(ids)
+            model.eval()
+            with torch.no_grad(): validation=loss(vx,vy,vl,False).item()
+            history.append(dict(epoch=epoch,train=total/len(x),validation=validation))
+            improved=validation<best; best=min(best,validation)
+            ck=dict(model=model.state_dict(),optimizer=optimizer.state_dict(),epoch=epoch,best=best,history=history,
+                    rng=torch.get_rng_state(),cuda_rng=torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,config=cfg)
+            torch.save(ck,last)
+            if improved: torch.save(ck,root/f'{kind}.pt')
+            epochs.set_postfix(train=f'{total/len(x):.5f}',validation=f'{validation:.5f}')
+            tqdm.write(f'{kind} {history[-1]}')
     save_json(root/f'{kind}.history.json',history)
 
 
@@ -129,16 +139,17 @@ def main():
             pairs=generator.generate(split,cfg['data'][split],cfg['seed']+i*1000000)
             scenes[split]=[s for s,e in pairs]
             for s,e in pairs: store(root,split,'expert',e)
-            print(split,len(pairs),flush=True)
+            tqdm.write(f'{split} {len(pairs)}')
         save_json(root/'scenes.json',scenes); save_json(root/'generation.json',generator.rejections)
     def collect():
         scenes=json.loads((root/'scenes.json').read_text()); env=ObstacleReach2D(cfg['env']); model=load_model(root,'bc',cfg)
         try:
             for j,split in enumerate(['train','validation']):
                 count=cfg['data']['rollouts'] if split=='train' else len(scenes[split])
-                for i in range(count):
-                    ep=rollout(env,scenes[split][i%len(scenes[split])],policy(model),cfg['seed']+10000000+j*100000+i,'bc',cfg['data']['exploration'])
-                    store(root,split,'rollout',ep)
+                with tqdm(range(count),desc=f'Rollout {split}',unit='episode',dynamic_ncols=True) as progress:
+                    for i in progress:
+                        ep=rollout(env,scenes[split][i%len(scenes[split])],policy(model),cfg['seed']+10000000+j*100000+i,'bc',cfg['data']['exploration'])
+                        store(root,split,'rollout',ep)
         finally: env.close()
     def evaluate():
         scenes=json.loads((root/'scenes.json').read_text()); report={}; env=ObstacleReach2D(cfg['env'])
@@ -147,7 +158,8 @@ def main():
             for name in ['bc','sft','recap']:
                 model=load_model(root,name,cfg); report[name]={}
                 for split in ['id','goal_ood','size_ood','composition_ood']:
-                    eps=[rollout(env,s,policy(model),cfg['seed']+20000000+i,name) for i,s in enumerate(scenes[split])]
+                    with tqdm(scenes[split],desc=f'Evaluate {name}/{split}',unit='episode',dynamic_ncols=True) as progress:
+                        eps=[rollout(env,s,policy(model),cfg['seed']+20000000+i,name) for i,s in enumerate(progress)]
                     annotate(eps,value,cfg)
                     for ep in eps: store(root,split,name,ep)
                     successes=[bool(e['success'][-1]) for e in eps]; n=len(eps); rate=float(np.mean(successes))
@@ -166,26 +178,34 @@ def main():
         import matplotlib
         matplotlib.use('Agg')
         import matplotlib.pyplot as plt
-        for path in root.glob('*.history.json'):
-            h=json.loads(path.read_text()); fig,ax=plt.subplots()
-            for key in ['train','validation']: ax.plot([r[key] for r in h],label=key)
-            ax.legend(); fig.savefig(root/f'{path.stem}.png'); plt.close(fig)
         eps=episodes(root,'id','recap')
-        if eps:
-            ep=eps[0]; fig,axes=plt.subplots(1,3,figsize=(15,4))
-            for key in ['value_prediction','mc_return','td_advantage']: axes[0].plot(ep[key],label=key)
-            axes[0].legend(); axes[1].scatter(ep['mc_return'],ep['value_prediction'],s=5)
-            from .env import points
-            scenes=json.loads((root/'scenes.json').read_text()); scene=next(s for s in scenes['id'] if s['scene_id']==str(ep['scene_id']))
-            axes[2].add_patch(plt.Circle(scene['obstacle'],scene['radius'],color='red'))
-            for q in ep['qpos'][::5]:
-                ps=points(q); axes[2].plot(ps[:,0],ps[:,1],alpha=.25)
-            axes[2].scatter(*scene['goal'],marker='*'); axes[2].set(xlim=(-1,1),ylim=(-1,1),aspect='equal')
-            fig.savefig(root/'trajectory.png'); plt.close(fig)
+        paths=list(root.glob('*.history.json'))
+        with tqdm(total=len(paths)+bool(eps),desc='Plot',unit='figure',dynamic_ncols=True) as progress:
+            for path in paths:
+                h=json.loads(path.read_text()); fig,ax=plt.subplots()
+                for key in ['train','validation']: ax.plot([r[key] for r in h],label=key)
+                ax.legend(); fig.savefig(root/f'{path.stem}.png'); plt.close(fig)
+                progress.update(1)
+            if eps:
+                ep=eps[0]; fig,axes=plt.subplots(1,3,figsize=(15,4))
+                for key in ['value_prediction','mc_return','td_advantage']: axes[0].plot(ep[key],label=key)
+                axes[0].legend(); axes[1].scatter(ep['mc_return'],ep['value_prediction'],s=5)
+                from .env import points
+                scenes=json.loads((root/'scenes.json').read_text()); scene=next(s for s in scenes['id'] if s['scene_id']==str(ep['scene_id']))
+                axes[2].add_patch(plt.Circle(scene['obstacle'],scene['radius'],color='red'))
+                for q in ep['qpos'][::5]:
+                    ps=points(q); axes[2].plot(ps[:,0],ps[:,1],alpha=.25)
+                axes[2].scatter(*scene['goal'],marker='*'); axes[2].set(xlim=(-1,1),ylim=(-1,1),aspect='equal')
+                fig.savefig(root/'trajectory.png'); plt.close(fig)
+                progress.update(1)
     if args.command=='all':
-        generate(); fit(root,'bc',cfg); collect()
-        for kind in ['sft','value','recap']: fit(root,kind,cfg)
-        evaluate(); plot()
+        stages=[('generate',generate),('train bc',lambda: fit(root,'bc',cfg)),('rollout',collect),
+                ('train sft',lambda: fit(root,'sft',cfg)),('train value',lambda: fit(root,'value',cfg)),
+                ('train recap',lambda: fit(root,'recap',cfg)),('evaluate',evaluate),('plot',plot)]
+        with tqdm(stages,desc='All stages',unit='stage',dynamic_ncols=True) as progress:
+            for name,action in progress:
+                progress.set_postfix_str(name)
+                action()
     elif args.command=='generate': generate()
     elif args.command=='train': fit(root,args.model,cfg,args.resume)
     elif args.command=='rollout': collect()
