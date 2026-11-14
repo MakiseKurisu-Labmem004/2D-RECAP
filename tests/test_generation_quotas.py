@@ -12,6 +12,7 @@ import recap.planning as planning
 @pytest.fixture
 def controlled_generator(monkeypatch):
     cfg = yaml.safe_load(Path('configs/default.yaml').read_text())
+    cfg['planner']['proposal'] = 'random'
     sequence = ['easy'] * 8 + ['medium'] * 4 + ['hard']
     envs = []
 
@@ -116,3 +117,42 @@ def test_zero_scene_count(controlled_generator):
     assert generator.generate('train', 0, 42) == []
     assert generator.difficulty_summary['train']['target'] == dict(easy=0, medium=0, hard=0)
     assert envs[-1].closed
+
+
+def test_guided_generation_targets_remaining_quotas(controlled_generator, monkeypatch):
+    cfg, sequence, envs = controlled_generator
+    cfg['planner']['proposal'] = 'guided'
+    sequence[:] = ['hard'] + ['medium'] * 3 + ['easy'] * 6
+    requested = []
+
+    def propose(scene, goal, difficulty, rng, config):
+        requested.append(difficulty)
+        return scene
+
+    monkeypatch.setattr(planning, 'propose_obstruction', propose)
+    generator = planning.ScenarioGenerator(cfg)
+    assert len(generator.generate('train', 10, 42)) == 10
+    assert requested == sequence
+    assert generator.difficulty_summary['train']['proposed'] == dict(easy=6, medium=3, hard=1)
+
+
+def test_failed_construction_preserves_missing_quota(controlled_generator, monkeypatch):
+    cfg, sequence, envs = controlled_generator
+    cfg['planner']['proposal'] = 'guided'
+    monkeypatch.setattr(planning, 'propose_obstruction', lambda *args: None)
+    generator = planning.ScenarioGenerator(cfg)
+    with pytest.raises(RuntimeError, match='missing difficulty quotas'):
+        generator.generate('train', 10, 42)
+    assert generator.rejections['construction_failed'] == cfg['planner']['max_attempts']
+    assert generator.difficulty_summary['train']['accepted'] == dict(easy=0, medium=0, hard=0)
+    assert envs[-1].closed
+
+
+def test_full_geometric_quota_skips_expert_execution(controlled_generator, monkeypatch):
+    from unittest.mock import Mock
+
+    cfg, sequence, envs = controlled_generator
+    execute = Mock(wraps=planning.rollout)
+    monkeypatch.setattr(planning, 'rollout', execute)
+    assert len(planning.ScenarioGenerator(cfg).generate('train', 10, 42)) == 10
+    assert execute.call_count == 10

@@ -23,6 +23,7 @@ env:
   success_distance: 0.03
   hold: 5
 planner:
+  proposal: guided
   resolution: 180
   interpolation: 0.008
   max_attempts: 10000

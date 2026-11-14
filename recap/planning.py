@@ -4,6 +4,7 @@ from tqdm import tqdm
 from .env import clearance, points, ObstacleReach2D
 from .sampling import sample_scene
 from .difficulty import DIFFICULTIES,difficulty_quotas
+from .proposals import propose_obstruction
 
 
 def ik(goal, limit):
@@ -87,9 +88,15 @@ class ScenarioGenerator:
     def generate(self,split,count,seed):
         ratios=self.cfg.get('difficulty_ratio')
         quotas=difficulty_quotas(count,ratios) if ratios is not None else None
+        method=self.cfg['planner'].get('proposal','random')
+        if method not in ('random','guided'):
+            raise ValueError('planner.proposal must be random or guided')
         counts=dict.fromkeys(DIFFICULTIES,0)
         summary=dict(target=quotas,accepted=counts,attempts=0)
         self.difficulty_summary[split]=summary
+        guided=method=='guided' and quotas is not None
+        if guided:
+            summary['proposed']=dict.fromkeys(DIFFICULTIES,0)
         rng=np.random.default_rng(seed); env=ObstacleReach2D(self.cfg['env']); accepted=[]
         progress=tqdm(total=count,desc=f'Generate {split}',unit='scene',dynamic_ncols=True)
         postfix={name:f'0/{quotas[name]}' for name in DIFFICULTIES} if quotas is not None else {}
@@ -100,23 +107,40 @@ class ScenarioGenerator:
                 postfix['attempt']=attempt+1
                 progress.set_postfix(postfix)
                 scene=sample_scene(rng,split,self.cfg,seed,attempt)
+                goals=ik(np.array(scene['goal']),self.cfg['env']['joint_limit'])
+                if guided:
+                    requested=next(name for name in reversed(DIFFICULTIES) if counts[name]<quotas[name])
+                    summary['proposed'][requested]+=1
+                    if goals:
+                        goal=goals[rng.integers(len(goals))]
+                        scene=propose_obstruction(scene,goal,requested,rng,self.cfg)
+                        goals=[goal]
+                    if scene is None or not goals:
+                        self.rejections['construction_failed']=self.rejections.get('construction_failed',0)+1
+                        continue
                 q0=np.array(scene['q0'])
                 reason='initial_collision'
                 if clearance(q0,scene,self.cfg['env']['link_radius']).min()>self.cfg['env']['margin']:
                     reason='planning_or_execution'
-                    for goal in ik(np.array(scene['goal']),self.cfg['env']['joint_limit']):
+                    for goal in goals:
                         path=plan(q0,goal,scene,self.cfg)
                         if path is None: continue
+                        length=float(np.linalg.norm(np.diff(path,axis=0),axis=1).sum())
+                        ratio=length/max(np.linalg.norm(goal-q0),1e-8)
+                        direct=safe_edge(q0,goal,scene,self.cfg)
+                        if quotas is not None and (
+                            (direct and counts['easy']>=quotas['easy']) or
+                            (not direct and ratio<self.cfg['planner']['hard_ratio'] and counts['medium']>=quotas['medium'])
+                        ):
+                            reason='difficulty_quota_full'
+                            continue
                         state=[1]
                         def expert(obs,env):
                             if np.max(abs(path[state[0]]-env.data.qpos))<.025 and state[0]<len(path)-1: state[0]+=1
                             return np.clip(path[state[0]]-env.data.qpos,-env.cfg['action_limit'],env.cfg['action_limit'])
                         ep=rollout(env,scene,expert,seed+attempt,'expert',limit=self.cfg['planner']['expert_limit'])
                         if not ep['success'][-1]: continue
-                        length=float(np.linalg.norm(np.diff(path,axis=0),axis=1).sum())
-                        ratio=length/max(np.linalg.norm(goal-q0),1e-8)
                         gap=float(ep['clearance'].min())
-                        direct=safe_edge(q0,goal,scene,self.cfg)
                         difficulty='easy' if direct else 'hard' if ratio>=self.cfg['planner']['hard_ratio'] and gap<self.cfg['planner']['hard_clearance'] else 'medium'
                         if quotas is not None and counts[difficulty]>=quotas[difficulty]:
                             reason='difficulty_quota_full'

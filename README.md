@@ -70,4 +70,6 @@ RECAP 使用 null NLL + alpha×高优势 NLL，另以 0.1 权重学习低条件�
 
 各数据划分独立执行顶层 `difficulty_ratio` 配比，默认 easy 为 0.60、medium 为 0.30、hard 为 0.10，三者之和为 1。整数配额使用最大余数法，相同余数按 easy、medium、hard 顺序分配。例如 200 条对应 120/60/20，50 条对应 30/15/5，4 条对应 3/1/0，2 条对应 1/1/0。
 
+默认 `planner.proposal: guided` 按剩余配额优先构造 hard、medium、easy 候选。medium 的障碍物放在关节直连运动时连杆扫过的区域。hard 还会从目标 IK 解附近采样起始关节姿态，以提高阻断直连后产生较大绕行比的机会。候选先检查起点、目标姿态间隙及障碍物中心距离，再进入 A* 和专家执行。目标仍从各集合对应的环带采样，障碍物位置和 hard 起点使用上述条件分布。实际难度继续由规划绕行比和执行间隙决定。`difficulty.json` 中的 `proposed` 记录各目标难度的候选次数，`generation.json` 中的 `construction_failed` 记录几何构造失败次数。`planner.proposal: random` 可使用独立随机候选。省略该字段的旧配置沿用 random。
+
 easy 表示初始关节姿态到所选 IK 解的关节空间直连满足安全间隙。其余场景中，规划绕行比达到 `planner.hard_ratio` 且实际专家轨迹最小间隙低于 `planner.hard_clearance` 时标为 hard，其余标为 medium。配额已满的难度停止收录，分类指标继续按原定义计算。达到 `planner.max_attempts` 后仍有缺额时生成失败，错误信息列出各难度缺额。`difficulty.json` 保存各集合的目标配额、已验收数量和尝试次数，失败时也会写入当前统计。旧配置省略 `difficulty_ratio` 时沿用无配额采样。
