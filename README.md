@@ -30,6 +30,14 @@ recap plot --run runs/seed42
 recap train --model recap --run runs/seed42 --resume
 ```
 
+`generate --resume` 检查当前运行目录，跳过已完成的数据划分，并补齐缺少或未完成的集合。`--splits` 可指定集合，例如仅补 composition：
+
+```bash
+recap generate --run runs/seed42 --config runs/seed42/config.json --resume --splits inner_composition_ood outer_composition_ood
+```
+
+每完成一个集合立即原子保存 `scenes.json`，并在新专家 NPZ 中嵌入该场景的 `scene_json`。旧版生成中断后若仅保存了 NPZ，首次续生成会从保存的观测和控制指令恢复场景，再核对专家动作序列与难度配额。恢复的场景标记 `recovered_from_expert`，目标和障碍参数精度来自原始 float32 观测。后续运行直接读取恢复后的清单。已有完整集合的 NPZ 保持原始内容。选择部分集合时，场景种子仍按完整数据划分顺序计算。
+
 `recap all` 顺序完成上述步骤。默认 200 条训练专家轨迹、400 条自主轨迹，另有独立 validation 和六个测试集合。生成成本可能较高，先运行 smoke。生成器达到尝试预算仍不足时会报错，不能把规划失败解释为场景不可解。已有场景 manifest 不允许覆盖；不同实验配置使用不同目录。多训练种子修改 YAML seed 并使用各自目录；如需跨种子严格共享测试集，应在实验前显式准备共享 manifest，目前没有跨运行聚合命令。
 
 ## 模块与数据
@@ -70,7 +78,7 @@ RECAP 使用 null NLL + alpha×高优势 NLL，另以 0.1 权重学习低条件�
 
 各数据划分独立执行顶层 `difficulty_ratio` 配比，三者之和为 1。整数配额使用最大余数法，相同余数按 easy、medium、hard 顺序分配。以 easy=0.60、medium=0.30、hard=0.10 为例，200 条对应 120/60/20，50 条对应 30/15/5，4 条对应 3/1/0，2 条对应 1/1/0。实际配比以所用 YAML 为准。
 
-默认 `planner.proposal: guided` 按剩余配额优先构造 hard、medium、easy 候选。medium 起点的每个关节与目标 IK 解相差 0.60～1.10 rad，障碍物放在关节直连运动时连杆扫过区域的边缘，以构造较浅的阻挡和较短的绕行。hard 起点的每个关节与目标 IK 解相差 0.30～0.70 rad，并将障碍物放在扫掠区域内部，以提高产生较大绕行比的机会。候选先检查起点、目标姿态间隙及障碍物中心距离，再进入 A* 和专家执行。目标仍从各集合对应的环带采样，障碍物位置和 medium/hard 起点使用上述条件分布。实际难度继续由规划绕行比和执行间隙决定。`difficulty.json` 中的 `proposed` 记录各目标难度的候选次数，`generation.json` 中的 `construction_failed` 记录几何构造失败次数。`planner.proposal: random` 可使用独立随机候选。省略该字段的旧配置沿用 random。
+默认 `planner.proposal: guided` 按各难度剩余配额加权选择目标难度，让每个有缺额的难度都有构造机会。medium 起点的每个关节与目标 IK 解相差 0.60～1.10 rad，障碍物放在关节直连运动时连杆扫过区域的边缘，以构造较浅的阻挡和较短的绕行。hard 起点以每关节 0.30～0.70 rad 为基准，按障碍物半径、连杆半径和安全间隙缩放偏移，以适应内圈大障碍物所需的起终姿态间隔，并检查两根连杆上的多组内部阻挡位置。越过关节限位时翻转偏移方向。候选先检查起点、目标姿态间隙及障碍物中心距离，再进入路径规划和专家执行。目标仍从各集合对应的环带采样，障碍物位置和 medium/hard 起点使用上述条件分布。实际难度继续由规划绕行比和执行间隙决定。`difficulty.json` 中的 `proposed` 记录各目标难度的候选次数，`rejections` 记录当前数据划分的淘汰原因。`generation.json` 记录全程累计结果。`planner.proposal: random` 可使用独立随机候选。省略该字段的旧配置沿用 random。
 
 easy 表示初始关节姿态到所选 IK 解的关节空间直连满足安全间隙。其余场景中，规划绕行比达到 `planner.hard_ratio` 且实际专家轨迹最小间隙低于 `planner.hard_clearance` 时标为 hard，其余标为 medium。配额已满的难度停止收录，分类指标继续按原定义计算。达到 `planner.max_attempts` 后仍有缺额时生成失败，错误信息列出各难度缺额。`difficulty.json` 保存各集合的目标配额、已验收数量和尝试次数，失败时也会写入当前统计。旧配置省略 `difficulty_ratio` 时沿用无配额采样。
 

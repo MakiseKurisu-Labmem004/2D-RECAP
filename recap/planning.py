@@ -106,32 +106,41 @@ def rollout(env,scene,policy,seed,version,noise=0.,limit=None):
 class ScenarioGenerator:
     def __init__(self,cfg):
         self.cfg=cfg; self.rejections={}; self.difficulty_summary={}
-    def generate(self,split,count,seed):
+    def generate(self,split,count,seed,initial_pairs=None):
         ratios=self.cfg.get('difficulty_ratio')
         quotas=difficulty_quotas(count,ratios) if ratios is not None else None
         method=self.cfg['planner'].get('proposal','random')
         if method not in ('random','guided'):
             raise ValueError('planner.proposal must be random or guided')
         counts=dict.fromkeys(DIFFICULTIES,0)
+        accepted=list(initial_pairs or [])
+        for scene,episode in accepted:
+            counts[scene['metrics']['difficulty']]+=1
+        if len(accepted)>count or (quotas is not None and any(counts[name]>quotas[name] for name in DIFFICULTIES)):
+            raise ValueError(f'{split}: existing scenes exceed the requested difficulty quotas')
+        existing_ids={episode['episode_id'].item() for scene,episode in accepted}
         summary=dict(target=quotas,accepted=counts,attempts=0)
         self.difficulty_summary[split]=summary
+        previous_rejections=self.rejections.copy()
         guided=method=='guided' and quotas is not None
         if guided:
             summary['proposed']=dict.fromkeys(DIFFICULTIES,0)
             summary['local_detours']=0
-        rng=np.random.default_rng(seed); env=ObstacleReach2D(self.cfg['env']); accepted=[]
-        progress=tqdm(total=count,desc=f'Generate {split}',unit='scene',dynamic_ncols=True)
-        postfix={name:f'0/{quotas[name]}' for name in DIFFICULTIES} if quotas is not None else {}
+        rng=np.random.default_rng(seed); env=ObstacleReach2D(self.cfg['env'])
+        progress=tqdm(total=count,initial=len(accepted),desc=f'Generate {split}',unit='scene',dynamic_ncols=True)
+        postfix={name:f'{counts[name]}/{quotas[name]}' for name in DIFFICULTIES} if quotas is not None else {}
         try:
             for attempt in range(self.cfg['planner']['max_attempts']):
                 if len(accepted)==count: return accepted
                 summary['attempts']=attempt+1
+                if f'expert-{seed+attempt}' in existing_ids: continue
                 postfix['attempt']=attempt+1
                 progress.set_postfix(postfix)
                 scene=sample_scene(rng,split,self.cfg,seed,attempt)
                 goals=ik(np.array(scene['goal']),self.cfg['env']['joint_limit'])
                 if guided:
-                    requested=next(name for name in reversed(DIFFICULTIES) if counts[name]<quotas[name])
+                    remaining=np.array([quotas[name]-counts[name] for name in DIFFICULTIES],dtype=float)
+                    requested=rng.choice(DIFFICULTIES,p=remaining/remaining.sum())
                     summary['proposed'][requested]+=1
                     if goals:
                         goal=goals[rng.integers(len(goals))]
@@ -187,7 +196,12 @@ class ScenarioGenerator:
                 self.rejections[reason]=self.rejections.get(reason,0)+1
             if len(accepted)==count: return accepted
             missing={name:quotas[name]-counts[name] for name in DIFFICULTIES} if quotas is not None else {}
-            raise RuntimeError(f'{split}: accepted {len(accepted)}/{count}; missing difficulty quotas: {missing}; rejection counts: {self.rejections}')
+            split_rejections={name:value-previous_rejections.get(name,0) for name,value in self.rejections.items()
+                              if value>previous_rejections.get(name,0)}
+            raise RuntimeError(f'{split}: accepted {len(accepted)}/{count}; missing difficulty quotas: {missing}; rejection counts: {split_rejections}')
         finally:
+            if guided:
+                summary['rejections']={name:value-previous_rejections.get(name,0) for name,value in self.rejections.items()
+                                       if value>previous_rejections.get(name,0)}
             progress.close()
             env.close()

@@ -37,7 +37,8 @@ def controlled_generator(monkeypatch):
     def rollout(env, scene, policy, seed, version, **kwargs):
         gap = .01 if scene['candidate_difficulty'] == 'hard' else .05
         return dict(success=np.array([True]), reward=np.array([0.]),
-                    clearance=np.array([gap]), qpos=np.array([[0., 0.]]))
+                    clearance=np.array([gap]), qpos=np.array([[0., 0.]]),
+                    episode_id=np.array(f'{version}-{seed}'))
 
     monkeypatch.setattr(planning, 'ObstacleReach2D', FakeEnv)
     monkeypatch.setattr(planning, 'sample_scene', sample_scene)
@@ -103,6 +104,16 @@ def test_config_without_ratios_preserves_unrestricted_sampling(controlled_genera
     assert generator.difficulty_summary['train']['target'] is None
 
 
+def test_partial_generation_retains_existing_episode_ids(controlled_generator):
+    cfg, sequence, envs = controlled_generator
+    cfg['difficulty_ratio'] = dict(easy=1, medium=0, hard=0)
+    sequence[:] = ['easy']
+    initial = planning.ScenarioGenerator(cfg).generate('train', 1, 42)
+    pairs = planning.ScenarioGenerator(cfg).generate('train', 2, 42, initial_pairs=initial)
+    assert pairs[0] is initial[0]
+    assert [episode['episode_id'].item() for scene, episode in pairs] == ['expert-42', 'expert-43']
+
+
 def test_invalid_ratio_fails_before_creating_environment(controlled_generator):
     cfg, sequence, envs = controlled_generator
     cfg['difficulty_ratio']['easy'] = .9
@@ -128,12 +139,13 @@ def test_guided_generation_targets_remaining_quotas(controlled_generator, monkey
 
     def propose(scene, goal, difficulty, rng, config):
         requested.append(difficulty)
+        scene['candidate_difficulty'] = difficulty
         return scene
 
     monkeypatch.setattr(planning, 'propose_obstruction', propose)
     generator = planning.ScenarioGenerator(cfg)
     assert len(generator.generate('train', 10, 42)) == 10
-    assert requested == sequence
+    assert Counter(requested) == dict(easy=6, medium=3, hard=1)
     assert generator.difficulty_summary['train']['proposed'] == dict(easy=6, medium=3, hard=1)
 
 
@@ -147,6 +159,28 @@ def test_failed_construction_preserves_missing_quota(controlled_generator, monke
     assert generator.rejections['construction_failed'] == cfg['planner']['max_attempts']
     assert generator.difficulty_summary['train']['accepted'] == dict(easy=0, medium=0, hard=0)
     assert envs[-1].closed
+
+
+def test_unavailable_hard_does_not_starve_other_quotas(controlled_generator, monkeypatch):
+    cfg, sequence, envs = controlled_generator
+    cfg['planner']['proposal'] = 'guided'
+    cfg['planner']['max_attempts'] = 100
+
+    def propose(scene, goal, difficulty, rng, config):
+        if difficulty == 'hard':
+            return None
+        scene['candidate_difficulty'] = difficulty
+        return scene
+
+    monkeypatch.setattr(planning, 'propose_obstruction', propose)
+    generator = planning.ScenarioGenerator(cfg)
+    generator.rejections['construction_failed'] = 1000
+    with pytest.raises(RuntimeError, match="missing difficulty quotas:.*'hard': 1") as error:
+        generator.generate('inner_composition_ood', 10, 42)
+    summary = generator.difficulty_summary['inner_composition_ood']
+    assert summary['accepted'] == dict(easy=6, medium=3, hard=0)
+    assert summary['rejections']['construction_failed'] == 91
+    assert '1000' not in str(error.value)
 
 
 def test_full_geometric_quota_skips_expert_execution(controlled_generator, monkeypatch):

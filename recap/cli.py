@@ -7,13 +7,14 @@ import torch
 import yaml
 from tqdm import tqdm
 from .env import ObstacleReach2D
-from .planning import ScenarioGenerator,rollout
+from .planning import rollout
 from .models import Model,returns,advantage,distribution_targets
-from .datasets import DATASET_SPLITS,LEGACY_DATASET_SPLITS
+from .datasets import DATASET_SPLITS
+from .generation import generate_datasets,write_json
 
 
 def save_json(path,obj):
-    Path(path).write_text(json.dumps(obj,indent=2),encoding='utf-8')
+    write_json(path,obj)
 
 
 def episodes(root,split,source='expert'):
@@ -127,26 +128,19 @@ def main():
     p=argparse.ArgumentParser(); p.add_argument('command',choices=['generate','train','rollout','evaluate','plot','all'])
     p.add_argument('--config',default='configs/default.yaml'); p.add_argument('--run',default='runs/default')
     p.add_argument('--model',choices=['bc','sft','value','recap'],default='bc'); p.add_argument('--resume',action='store_true')
+    p.add_argument('--splits',nargs='+',choices=(*DATASET_SPLITS,'goal_ood','composition_ood'),
+                   help='Generate only these datasets. Combine with --resume to skip completed datasets.')
     args=p.parse_args(); cfg=yaml.safe_load(Path(args.config).read_text()); root=Path(args.run); root.mkdir(parents=True,exist_ok=True)
+    if args.splits and args.command not in ('generate','all'):
+        p.error('--splits is supported by generate and all')
     random.seed(cfg['seed']); np.random.seed(cfg['seed']); torch.manual_seed(cfg['seed'])
     torch.use_deterministic_algorithms(True)
     if (root/'config.json').exists() and json.loads((root/'config.json').read_text())!=cfg:
         raise ValueError('Use a new run directory for changed configurations')
-    save_json(root/'config.json',cfg)
+    if args.command not in ('generate','all'):
+        save_json(root/'config.json',cfg)
     def generate():
-        if (root/'scenes.json').exists(): raise FileExistsError('Fixed scenarios already exist; use a new run directory')
-        scenes={}; generator=ScenarioGenerator(cfg)
-        splits=LEGACY_DATASET_SPLITS if any(name in cfg['data'] for name in ('goal_ood','composition_ood')) else DATASET_SPLITS
-        try:
-            for i,split in enumerate(splits):
-                pairs=generator.generate(split,cfg['data'][split],cfg['seed']+i*1000000)
-                scenes[split]=[s for s,e in pairs]
-                for s,e in pairs: store(root,split,'expert',e)
-                tqdm.write(f'{split} {len(pairs)}')
-            save_json(root/'scenes.json',scenes)
-        finally:
-            save_json(root/'generation.json',generator.rejections)
-            save_json(root/'difficulty.json',generator.difficulty_summary)
+        generate_datasets(root,cfg,selected=args.splits,resume=args.resume)
     def collect():
         scenes=json.loads((root/'scenes.json').read_text()); env=ObstacleReach2D(cfg['env']); model=load_model(root,'bc',cfg)
         try:
