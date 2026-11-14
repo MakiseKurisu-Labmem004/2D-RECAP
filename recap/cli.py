@@ -9,6 +9,7 @@ from tqdm import tqdm
 from .env import ObstacleReach2D
 from .planning import ScenarioGenerator,rollout
 from .models import Model,returns,advantage,distribution_targets
+from .datasets import DATASET_SPLITS,LEGACY_DATASET_SPLITS
 
 
 def save_json(path,obj):
@@ -135,12 +136,17 @@ def main():
     def generate():
         if (root/'scenes.json').exists(): raise FileExistsError('Fixed scenarios already exist; use a new run directory')
         scenes={}; generator=ScenarioGenerator(cfg)
-        for i,split in enumerate(['train','validation','id','goal_ood','size_ood','composition_ood']):
-            pairs=generator.generate(split,cfg['data'][split],cfg['seed']+i*1000000)
-            scenes[split]=[s for s,e in pairs]
-            for s,e in pairs: store(root,split,'expert',e)
-            tqdm.write(f'{split} {len(pairs)}')
-        save_json(root/'scenes.json',scenes); save_json(root/'generation.json',generator.rejections)
+        splits=LEGACY_DATASET_SPLITS if any(name in cfg['data'] for name in ('goal_ood','composition_ood')) else DATASET_SPLITS
+        try:
+            for i,split in enumerate(splits):
+                pairs=generator.generate(split,cfg['data'][split],cfg['seed']+i*1000000)
+                scenes[split]=[s for s,e in pairs]
+                for s,e in pairs: store(root,split,'expert',e)
+                tqdm.write(f'{split} {len(pairs)}')
+            save_json(root/'scenes.json',scenes)
+        finally:
+            save_json(root/'generation.json',generator.rejections)
+            save_json(root/'difficulty.json',generator.difficulty_summary)
     def collect():
         scenes=json.loads((root/'scenes.json').read_text()); env=ObstacleReach2D(cfg['env']); model=load_model(root,'bc',cfg)
         try:
@@ -157,7 +163,7 @@ def main():
         try:
             for name in ['bc','sft','recap']:
                 model=load_model(root,name,cfg); report[name]={}
-                for split in ['id','goal_ood','size_ood','composition_ood']:
+                for split in (name for name in scenes if name not in ('train','validation') and scenes[name]):
                     with tqdm(scenes[split],desc=f'Evaluate {name}/{split}',unit='episode',dynamic_ncols=True) as progress:
                         eps=[rollout(env,s,policy(model),cfg['seed']+20000000+i,name) for i,s in enumerate(progress)]
                     annotate(eps,value,cfg)

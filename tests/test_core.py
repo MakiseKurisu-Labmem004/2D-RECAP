@@ -62,6 +62,7 @@ def test_models(cfg):
     loss=m.value(x).sum(); loss.backward()
 
 def test_executable_scenario(cfg):
+    cfg.pop('difficulty_ratio',None)
     cfg['planner']['max_attempts']=100
     pairs=ScenarioGenerator(cfg).generate('train',1,42)
     assert len(pairs)==1 and pairs[0][1]['success'][-1]

@@ -2,6 +2,8 @@ import heapq
 import numpy as np
 from tqdm import tqdm
 from .env import clearance, points, ObstacleReach2D
+from .sampling import sample_scene
+from .difficulty import DIFFICULTIES,difficulty_quotas
 
 
 def ik(goal, limit):
@@ -80,21 +82,25 @@ def rollout(env,scene,policy,seed,version,noise=0.,limit=None):
 
 
 class ScenarioGenerator:
-    def __init__(self,cfg): self.cfg=cfg; self.rejections={}
+    def __init__(self,cfg):
+        self.cfg=cfg; self.rejections={}; self.difficulty_summary={}
     def generate(self,split,count,seed):
+        ratios=self.cfg.get('difficulty_ratio')
+        quotas=difficulty_quotas(count,ratios) if ratios is not None else None
+        counts=dict.fromkeys(DIFFICULTIES,0)
+        summary=dict(target=quotas,accepted=counts,attempts=0)
+        self.difficulty_summary[split]=summary
         rng=np.random.default_rng(seed); env=ObstacleReach2D(self.cfg['env']); accepted=[]
         progress=tqdm(total=count,desc=f'Generate {split}',unit='scene',dynamic_ncols=True)
+        postfix={name:f'0/{quotas[name]}' for name in DIFFICULTIES} if quotas is not None else {}
         try:
             for attempt in range(self.cfg['planner']['max_attempts']):
                 if len(accepted)==count: return accepted
-                progress.set_postfix(attempt=attempt+1)
-                q0=rng.uniform([-2.,-.8],[2.,2.4])
-                angle=rng.uniform(-1.3,-.15) if split in ('goal_ood','composition_ood') else rng.uniform(.15,1.3)
-                radial=rng.uniform(.45,.85)
-                scene=dict(q0=q0.tolist(),goal=(radial*np.array([np.cos(angle),np.sin(angle)])).tolist(),
-                           obstacle=rng.uniform([.15,-.35],[.65,.55]).tolist(),
-                           radius=float(rng.uniform(.10,.13) if split in ('size_ood','composition_ood') else rng.uniform(.05,.09)),
-                           scene_id=f'{split}-{seed}-{attempt}',split=split)
+                summary['attempts']=attempt+1
+                postfix['attempt']=attempt+1
+                progress.set_postfix(postfix)
+                scene=sample_scene(rng,split,self.cfg,seed,attempt)
+                q0=np.array(scene['q0'])
                 reason='initial_collision'
                 if clearance(q0,scene,self.cfg['env']['link_radius']).min()>self.cfg['env']['margin']:
                     reason='planning_or_execution'
@@ -112,14 +118,23 @@ class ScenarioGenerator:
                         gap=float(ep['clearance'].min())
                         direct=safe_edge(q0,goal,scene,self.cfg)
                         difficulty='easy' if direct else 'hard' if ratio>=self.cfg['planner']['hard_ratio'] and gap<self.cfg['planner']['hard_clearance'] else 'medium'
+                        if quotas is not None and counts[difficulty]>=quotas[difficulty]:
+                            reason='difficulty_quota_full'
+                            continue
                         scene['metrics']=dict(steps=len(ep['reward']),joint_path_length=length,
                             ee_path_length=float(np.linalg.norm(np.diff(np.array([points(q)[-1] for q in ep['qpos']]),axis=0),axis=1).sum()),
                             detour_ratio=ratio,min_clearance=gap,difficulty=difficulty)
                         accepted.append((scene,ep)); reason='accepted'
+                        counts[difficulty]+=1
+                        if quotas is not None:
+                            postfix[difficulty]=f'{counts[difficulty]}/{quotas[difficulty]}'
+                            progress.set_postfix(postfix,refresh=False)
                         progress.update(1)
                         break
                 self.rejections[reason]=self.rejections.get(reason,0)+1
-            raise RuntimeError(f'Accepted {len(accepted)}/{count}; rejection counts: {self.rejections}')
+            if len(accepted)==count: return accepted
+            missing={name:quotas[name]-counts[name] for name in DIFFICULTIES} if quotas is not None else {}
+            raise RuntimeError(f'{split}: accepted {len(accepted)}/{count}; missing difficulty quotas: {missing}; rejection counts: {self.rejections}')
         finally:
             progress.close()
             env.close()

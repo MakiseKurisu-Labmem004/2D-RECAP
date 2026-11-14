@@ -1,5 +1,14 @@
 seed: 42
 device: auto
+difficulty_ratio:
+  easy: 0.60
+  medium: 0.30
+  hard: 0.10
+sampling:
+  goal_radius: [0.40, 0.70]
+  inner_goal_radius: [0.20, 0.35]
+  outer_goal_radius: [0.75, 0.90]
+  obstacle_center_radius: [0.20, 0.80]
 env:
   horizon: 200
   timestep: 0.005
@@ -24,9 +33,11 @@ data:
   train: 4
   validation: 2
   id: 2
-  goal_ood: 2
+  inner_goal_ood: 2
+  outer_goal_ood: 2
   size_ood: 2
-  composition_ood: 2
+  inner_composition_ood: 2
+  outer_composition_ood: 2
   rollouts: 8
   exploration: 0.005
 train:
