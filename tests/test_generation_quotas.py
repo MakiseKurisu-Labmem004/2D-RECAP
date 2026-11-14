@@ -12,6 +12,7 @@ import recap.planning as planning
 @pytest.fixture
 def controlled_generator(monkeypatch):
     cfg = yaml.safe_load(Path('configs/default.yaml').read_text())
+    cfg['difficulty_ratio'] = dict(easy=.60, medium=.30, hard=.10)
     cfg['planner']['proposal'] = 'random'
     sequence = ['easy'] * 8 + ['medium'] * 4 + ['hard']
     envs = []
@@ -156,3 +157,39 @@ def test_full_geometric_quota_skips_expert_execution(controlled_generator, monke
     monkeypatch.setattr(planning, 'rollout', execute)
     assert len(planning.ScenarioGenerator(cfg).generate('train', 10, 42)) == 10
     assert execute.call_count == 10
+
+
+def test_guided_medium_uses_local_path_before_astar(controlled_generator, monkeypatch):
+    from unittest.mock import Mock
+
+    cfg, sequence, envs = controlled_generator
+    cfg['planner']['proposal'] = 'guided'
+    cfg['difficulty_ratio'] = dict(easy=0, medium=1, hard=0)
+    sequence[:] = ['medium']
+    monkeypatch.setattr(planning, 'propose_obstruction', lambda scene, *args: scene)
+    monkeypatch.setattr(planning, 'local_medium_detour',
+                        lambda start, goal, *args: np.array([start, [.5, .2], goal]))
+    search = Mock(side_effect=AssertionError('Unexpected grid search'))
+    monkeypatch.setattr(planning, 'plan', search)
+    generator = planning.ScenarioGenerator(cfg)
+    assert len(generator.generate('train', 2, 42)) == 2
+    assert generator.difficulty_summary['train']['local_detours'] == 2
+    search.assert_not_called()
+
+
+def test_guided_medium_rejects_large_detour_before_execution(controlled_generator, monkeypatch):
+    from unittest.mock import Mock
+
+    cfg, sequence, envs = controlled_generator
+    cfg['planner']['proposal'] = 'guided'
+    cfg['difficulty_ratio'] = dict(easy=0, medium=1, hard=0)
+    sequence[:] = ['hard']
+    monkeypatch.setattr(planning, 'propose_obstruction', lambda scene, *args: scene)
+    monkeypatch.setattr(planning, 'local_medium_detour', lambda *args: None)
+    execute = Mock(wraps=planning.rollout)
+    monkeypatch.setattr(planning, 'rollout', execute)
+    generator = planning.ScenarioGenerator(cfg)
+    with pytest.raises(RuntimeError, match='missing difficulty quotas'):
+        generator.generate('train', 2, 42)
+    assert generator.rejections['medium_detour_too_long'] == cfg['planner']['max_attempts']
+    execute.assert_not_called()

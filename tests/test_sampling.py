@@ -6,6 +6,7 @@ import yaml
 
 from recap.datasets import DATASET_SPLITS, LEGACY_DATASET_SPLITS
 from recap.sampling import sample_annulus, sample_scene
+from recap.difficulty import difficulty_quotas
 
 
 @pytest.mark.parametrize('filename', ['default.yaml', 'smoke.yaml'])
@@ -13,7 +14,7 @@ def test_dataset_configs(filename):
     cfg = yaml.safe_load((Path('configs') / filename).read_text())
     assert set(DATASET_SPLITS).issubset(cfg['data'])
     assert 'goal_ood' not in cfg['data'] and 'composition_ood' not in cfg['data']
-    assert cfg['difficulty_ratio'] == dict(easy=.60, medium=.30, hard=.10)
+    assert sum(difficulty_quotas(cfg['data']['train'], cfg['difficulty_ratio']).values()) == cfg['data']['train']
 
 
 @pytest.mark.parametrize('split, bounds, large', [

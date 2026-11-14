@@ -25,6 +25,27 @@ def safe_edge(a,b,scene,cfg):
     return all(clearance(q,scene,cfg['env']['link_radius']).min()>cfg['env']['margin'] for q in np.linspace(a,b,n))
 
 
+def local_medium_detour(start, goal, scene, cfg):
+    delta = goal - start
+    distance = np.linalg.norm(delta)
+    if distance < 1e-8:
+        return None
+    normal = np.array([-delta[1], delta[0]]) / distance
+    middle = (start + goal) / 2
+    for scale in (.15, .30, .45):
+        for sign in (-1, 1):
+            waypoint = middle + sign * scale * distance * normal
+            if np.any(np.abs(waypoint) > cfg['env']['joint_limit']):
+                continue
+            path = np.array([start, waypoint, goal])
+            ratio = np.linalg.norm(np.diff(path, axis=0), axis=1).sum() / distance
+            if ratio >= cfg['planner']['hard_ratio']:
+                continue
+            if safe_edge(start, waypoint, scene, cfg) and safe_edge(waypoint, goal, scene, cfg):
+                return path
+    return None
+
+
 def plan(start,goal,scene,cfg):
     if safe_edge(start,goal,scene,cfg): return np.array([start,goal])
     size = cfg['planner']['resolution']
@@ -97,6 +118,7 @@ class ScenarioGenerator:
         guided=method=='guided' and quotas is not None
         if guided:
             summary['proposed']=dict.fromkeys(DIFFICULTIES,0)
+            summary['local_detours']=0
         rng=np.random.default_rng(seed); env=ObstacleReach2D(self.cfg['env']); accepted=[]
         progress=tqdm(total=count,desc=f'Generate {split}',unit='scene',dynamic_ncols=True)
         postfix={name:f'0/{quotas[name]}' for name in DIFFICULTIES} if quotas is not None else {}
@@ -123,11 +145,18 @@ class ScenarioGenerator:
                 if clearance(q0,scene,self.cfg['env']['link_radius']).min()>self.cfg['env']['margin']:
                     reason='planning_or_execution'
                     for goal in goals:
-                        path=plan(q0,goal,scene,self.cfg)
+                        path=None
+                        if guided and requested=='medium':
+                            path=local_medium_detour(q0,goal,scene,self.cfg)
+                            if path is not None: summary['local_detours']+=1
+                        if path is None: path=plan(q0,goal,scene,self.cfg)
                         if path is None: continue
                         length=float(np.linalg.norm(np.diff(path,axis=0),axis=1).sum())
                         ratio=length/max(np.linalg.norm(goal-q0),1e-8)
                         direct=safe_edge(q0,goal,scene,self.cfg)
+                        if guided and requested=='medium' and not direct and ratio>=self.cfg['planner']['hard_ratio']:
+                            reason='medium_detour_too_long'
+                            continue
                         if quotas is not None and (
                             (direct and counts['easy']>=quotas['easy']) or
                             (not direct and ratio<self.cfg['planner']['hard_ratio'] and counts['medium']>=quotas['medium'])

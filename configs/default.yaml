@@ -1,8 +1,8 @@
 seed: 42
 device: auto
 difficulty_ratio:
-  easy: 0.60
-  medium: 0.30
+  easy: 0.70
+  medium: 0.20
   hard: 0.10
 sampling:
   goal_radius: [0.40, 0.70]

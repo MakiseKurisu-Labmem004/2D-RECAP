@@ -29,6 +29,9 @@ def test_constructed_obstacle_blocks_direct_motion(difficulty):
         if difficulty == 'hard':
             assert np.all(np.abs(start - goal_q) >= .30)
             assert np.all(np.abs(start - goal_q) <= .70)
+        else:
+            assert np.all(np.abs(start - goal_q) >= .60)
+            assert np.all(np.abs(start - goal_q) <= 1.10)
         checked += 1
     assert checked >= 10
 
