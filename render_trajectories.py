@@ -1,14 +1,16 @@
 """Export saved RECAP trajectories to top-down MP4 videos without OpenGL."""
 
 import argparse
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import json
 import math
+from multiprocessing import get_context
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from tqdm import tqdm
 
 
-def render_video(path, scene, env, output):
+def render_video(path, scene, env, output, show_progress=True):
     import matplotlib
 
     matplotlib.use("Agg")
@@ -57,9 +59,11 @@ def render_video(path, scene, env, output):
         # Match the rendered capsule width to the configured physical radius.
         fig.canvas.draw()
         arm.set_linewidth(2 * env["link_radius"] / 2.16 * ax.bbox.width * 72 / fig.dpi)
+        # Reuse the layout calculated above instead of solving it for every frame.
+        fig.set_layout_engine("none")
         writer = FFMpegWriter(
             fps=fps, codec="libx264",
-            extra_args=["-pix_fmt", "yuv420p", "-movflags", "+faststart"],
+            extra_args=["-pix_fmt", "yuv420p", "-movflags", "+faststart", "-threads", "1"],
         )
         output.parent.mkdir(parents=True, exist_ok=True)
         # Publish only complete videos, including when replacing an existing export.
@@ -67,7 +71,8 @@ def render_video(path, scene, env, output):
             video = Path(temporary) / output.name
             with (
                 tqdm(total=len(joints)+round(fps),desc=f'Frames {path.stem}',
-                     unit='frame',leave=False,dynamic_ncols=True) as progress,
+                     unit='frame',leave=False,dynamic_ncols=True,
+                     disable=not show_progress) as progress,
                 writer.saving(fig, str(video), dpi=100),
             ):
                 for step, xy in enumerate(joints):
@@ -88,6 +93,7 @@ def render_video(path, scene, env, output):
             video.replace(output)
     finally:
         plt.close(fig)
+    return output
 
 
 def main():
@@ -105,9 +111,13 @@ def main():
     )
     parser.add_argument("--limit", type=int, help="Maximum number of matching files to process.")
     parser.add_argument("--overwrite", action="store_true", help="Replace existing MP4 exports.")
+    parser.add_argument("--workers", type=int, default=1,
+                        help="Number of parallel video export processes. Default: 1.")
     args = parser.parse_args()
     if args.limit is not None and args.limit < 1:
         parser.error("--limit must be a positive integer")
+    if args.workers < 1:
+        parser.error("--workers must be a positive integer")
 
     run = args.run.resolve()
     for filename in ("scenes.json", "config.json"):
@@ -132,18 +142,42 @@ def main():
     if not math.isfinite(dt) or dt <= 0:
         parser.error("env.timestep * env.substeps must be finite and positive")
 
-    with tqdm(paths,desc="Export videos",unit="video",dynamic_ncols=True) as progress:
-        for path in progress:
+    with tqdm(total=len(paths),desc="Export videos",unit="video",dynamic_ncols=True) as progress:
+        jobs = []
+        for path in paths:
             output = run / "videos" / path.relative_to(data).with_suffix(".mp4")
             if output.exists() and not args.overwrite:
                 tqdm.write(f"Skip existing {output}")
+                progress.update(1)
                 continue
             with np.load(path, allow_pickle=False) as episode:
                 scene_id = episode["scene_id"].item()
             if scene_id not in scenes:
                 parser.error(f"{path}: scene {scene_id!r} is missing from scenes.json")
-            render_video(path, scenes[scene_id], env, output)
-            tqdm.write(str(output))
+            jobs.append((path, scenes[scene_id], env, output))
+
+        if args.workers == 1:
+            for job in jobs:
+                tqdm.write(str(render_video(*job)))
+                progress.update(1)
+        elif jobs:
+            # Spawn isolates Matplotlib state and works on both Windows and Linux.
+            with ProcessPoolExecutor(max_workers=min(args.workers, len(jobs)),
+                                     mp_context=get_context("spawn")) as executor:
+                futures = {executor.submit(render_video, *job, show_progress=False): job[0]
+                           for job in jobs}
+                try:
+                    for future in as_completed(futures):
+                        try:
+                            output = future.result()
+                        except Exception as exc:
+                            raise RuntimeError(f"Failed to export {futures[future]}: {exc}") from exc
+                        tqdm.write(str(output))
+                        progress.update(1)
+                except BaseException:
+                    for future in futures:
+                        future.cancel()
+                    raise
 
 
 if __name__ == "__main__":
