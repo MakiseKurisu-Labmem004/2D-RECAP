@@ -16,4 +16,4 @@ python frontend/serve.py
 python frontend/serve.py --run runs/seed42 --port 8042
 ```
 
-服务仅监听本机，实验文件只读。新增轨迹后重启服务以重新建立索引。前端不依赖 CDN。NPZ 使用标准库读取非 Fortran 排序的数值 / Unicode 数组，无需 NumPy。
+服务仅监听本机，实验文件只读。新增或替换轨迹后，点击页面“刷新目录数据”即可重新建立索引，无需重启服务。划分与数量来自 scenes.json 和实际 NPZ，难度配额来自 difficulty.json，生成统计完整读取 generation.json。前端不依赖 CDN。NPZ 使用标准库读取非 Fortran 排序的数值 / Unicode 数组，无需 NumPy。

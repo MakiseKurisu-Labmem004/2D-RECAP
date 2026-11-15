@@ -26,22 +26,34 @@ function navigate() {
   pause();
   if(data && currentPage==='episodes') renderEpisodeNav();
 }
-function renderTabs(){ $('split-tabs').innerHTML=Object.keys(names).filter(key=>key==='all'||key in data.scenes).map(key=>`<button data-split="${key}" class="${split===key?'active':''}">${names[key]}<span>${key==='all'?Object.keys(scenes).length:(data.scenes[key]||[]).length}</span></button>`).join(''); }
+function renderTabs(){ $('split-tabs').innerHTML=['all',...Object.keys(data.scenes)].map(key=>`<button data-split="${key}" class="${split===key?'active':''}">${names[key]}<span>${key==='all'?Object.keys(scenes).length:(data.scenes[key]||[]).length}</span></button>`).join(''); }
 function updateFilters(){renderTabs();renderOverview();renderEpisodeNav();const rows=filteredEpisodes();$('replay-empty').hidden=rows.length>0;if(!selected||!rows.some(e=>e.path===selected.path)){if(rows.length) selectEpisode(rows[0]);else{requestId++;pause();detail=null;selected=null;$('player').hidden=true;}}}
 function renderOverview(){
   const ss=filteredScenes(), es=filteredEpisodes(), steps=es.map(e=>e.steps);
   const stats=[['场景总数',ss.length,'个',split==='all'?`${Object.keys(data.scenes).length} 个独立数据划分`:`${names[split]} 数据划分`,'◫'],['轨迹总数',es.length,'条',`${[...new Set(es.map(e=>e.source))].join(' / ')||'暂无'} · 已保存 episode`,'⌁'],['平均轨迹长度',es.length?fmt(mean(steps),1):'—','步',es.length?`平均时长 ${fmt(mean(steps)*dt())} s`:'当前筛选暂无轨迹','↔'],['累计控制步',steps.reduce((a,b)=>a+b,0).toLocaleString(),'步',`控制频率 ${fmt(1/dt(),0)} Hz`,'⌘']];
   $('stats').innerHTML=stats.map(([label,value,unit,foot,icon])=>`<div class="stat"><div class="stat-label">${label}</div><span class="stat-icon">${icon}</span><div class="stat-value">${value}<small>${unit}</small></div><div class="stat-foot">${escapeHTML(foot)}</div></div>`).join('');
   renderScatter(ss);
-  const total=Object.keys(scenes).length;
-  $('split-bars').innerHTML=Object.keys(colors).filter(key=>key in data.scenes).map(key=>`<div class="split-row"><span>${names[key]}</span><div class="bar-track"><div style="width:${(data.scenes[key]||[]).length/Math.max(...Object.values(data.scenes).map(a=>a.length),1)*100}%;background:${colors[key]};opacity:${split==='all'||split===key?1:.3}"></div></div><strong>${(data.scenes[key]||[]).length}</strong></div>`).join('');
+  $('split-description').textContent=`${Object.keys(data.scenes).length} 个实际数据划分 · ${Object.keys(scenes).length} 个场景`;
+  renderQuotas();
+  $('split-bars').innerHTML=Object.keys(data.scenes).map(key=>`<div class="split-row"><span>${names[key]}</span><div class="bar-track"><div style="width:${(data.scenes[key]||[]).length/Math.max(...Object.values(data.scenes).map(a=>a.length),1)*100}%;background:${colors[key]};opacity:${split==='all'||split===key?1:.3}"></div></div><strong>${(data.scenes[key]||[]).length}</strong></div>`).join('');
   const ds=Object.keys(difficultyColors).map(key=>[key,ss.filter(s=>s.metrics.difficulty===key).length]);
   $('difficulty-total').textContent=`${ss.length} SCENES`;
   $('difficulty-bar').innerHTML=ds.map(([key,n])=>`<div style="width:${ss.length?n/ss.length*100:0}%;background:${difficultyColors[key]};border-radius:2px" title="${key}: ${n}"></div>`).join('');
   $('difficulty-legend').innerHTML=ds.map(([key,n])=>`<span><i style="background:${difficultyColors[key]}"></i>${key[0].toUpperCase()+key.slice(1)} <b>${n}</b></span>`).join('');
   renderHistogram(steps);
-  const gen=data.generation, entries=[['已接受场景','accepted','#668e6f'],['初始碰撞','initial_collision','#b5a47f'],['规划 / 执行未通过','planning_or_execution','#a8afa2'],['难度配额已满','difficulty_quota_full','#a08cad']];
-  $('generation').innerHTML=entries.map(([label,key,color])=>`<div><div class="generation-value" style="color:${color}">${gen[key]??'—'}</div><div class="generation-label">${label}</div><div class="generation-detail">${key==='accepted'?`${fmt((gen[key]||0)/Math.max(Object.values(gen).reduce((a,b)=>a+b,0),1)*100,1)}% ACCEPTANCE`:key==='initial_collision'?'INITIAL COLLISION':key==='difficulty_quota_full'?'DIFFICULTY QUOTA FULL':'PLANNING / EXECUTION'}</div></div>`).join('');
+  const labels={accepted:'已接受场景',initial_collision:'初始碰撞',planning_or_execution:'规划 / 执行未通过',difficulty_quota_full:'难度配额已满',construction_failed:'候选构造失败',medium_detour_too_long:'Medium 绕行过长'};
+  $('generation').innerHTML=Object.entries(data.generation).map(([key,value])=>`<div><div class="generation-value">${Number(value).toLocaleString()}</div><div class="generation-label">${escapeHTML(labels[key]||key)}</div><div class="generation-detail">${escapeHTML(key)}</div></div>`).join('')||'<p class="muted">目录中暂无生成统计</p>';
+
+}
+function renderQuotas(){
+  const groups=Object.entries(data.difficulty||{}).filter(([key])=>split==='all'||key===split);
+  $('quota-card').hidden=!groups.length;
+  let actualTotal=0,targetTotal=0,quotaMatch=true;
+  $('quota-grid').innerHTML=groups.map(([key,record])=>{
+    const actual={easy:0,medium:0,hard:0};(data.scenes[key]||[]).forEach(s=>{if(s.metrics?.difficulty in actual)actual[s.metrics.difficulty]++;});
+    return `<div class="quota-group"><h3>${escapeHTML(names[key]||key)}</h3>${Object.keys(difficultyColors).map(level=>{const target=record.target?.[level];actualTotal+=actual[level];targetTotal+=Number(target)||0;quotaMatch=quotaMatch&&target===actual[level];return `<div class="quota-row"><span><i style="background:${difficultyColors[level]}"></i>${level}</span><strong class="${target===actual[level]?'quota-ok':''}">${actual[level]} / ${target??'—'}</strong></div>`;}).join('')}<small>场景清单 / 目标配额</small><p>尝试 ${record.attempts??'—'} · 局部绕行 ${record.local_detours??'—'}</p></div>`;
+  }).join('');
+  $('quota-summary').textContent=`${actualTotal} / ${targetTotal} 场景 · ${quotaMatch?'配额一致':'配额待核对'}（全部难度）`;
 }
 function renderScatter(ss){
   const w=600,h=285,left=48,right=570,top=18,bottom=250,x=v=>left+(v+1)/2*(right-left),y=v=>bottom-(v+1)/2*(bottom-top);
@@ -50,7 +62,7 @@ function renderScatter(ss){
   svg+=ss.map(s=>`<circle class="scatter-point" tabindex="0" role="button" aria-label="查看 ${escapeHTML(s.scene_id)}" data-scene="${escapeHTML(s.scene_id)}" cx="${x(s.goal[0])}" cy="${y(s.goal[1])}" r="3.4" fill="${colors[s.split]||'#78977d'}" opacity=".75"><title>${escapeHTML(s.scene_id)} · ${s.metrics.difficulty}\nx=${fmt(s.goal[0],3)}, y=${fmt(s.goal[1],3)}</title></circle>`).join('');
   if(!ss.length) svg+='<text x="300" y="140" text-anchor="middle" class="axis-text">当前筛选暂无场景</text>';
   $('scatter').innerHTML=`<svg viewBox="0 0 ${w} ${h}" role="img" aria-label="目标位置散点图">${svg}</svg>`;
-  $('scatter-legend').innerHTML=Object.entries(colors).filter(([key])=>key in data.scenes).map(([key,color])=>`<span><i style="background:${color}"></i>${names[key]}</span>`).join('');
+  $('scatter-legend').innerHTML=Object.keys(data.scenes).map(key=>[key,colors[key]]).map(([key,color])=>`<span><i style="background:${color}"></i>${names[key]}</span>`).join('');
 }
 function renderHistogram(values){
   const max=Math.max(...values,20), binWidth=Math.ceil(max/8), bins=Array.from({length:8},(_,i)=>values.filter(v=>v>=i*binWidth &&(i===7?v<=(i+1)*binWidth:v<(i+1)*binWidth)).length), peak=Math.max(...bins,1);
@@ -84,7 +96,7 @@ async function selectEpisode(e){
   pause();const req=++requestId;selected=e;detail=null;frame=0;$('player').hidden=false;$('selected-label').textContent=`${e.scene_id} / ${e.episode_id} · 正在读取…`;$('arm-stage').innerHTML='';$('play').disabled=true;syncEpisodeNav();
   try{const response=await fetch(`/api/episode?path=${encodeURIComponent(e.path)}`);if(!response.ok)throw new Error('轨迹读取失败');const result=await response.json();if(req!==requestId)return;detail=result;
     $('play').disabled=false;$('selected-label').textContent=`${e.scene_id} / ${e.episode_id} · ${names[e.split]}`;$('episode-name').textContent=e.episode_id;$('outcome').innerHTML=`<span class="badge ${e.success?'':'fail'}">${e.success?'SUCCESS':'FAILED'}</span>`;
-    const s=scenes[e.scene_id];$('episode-metrics').innerHTML=[['数据划分',names[e.split]],['轨迹来源',e.source],['轨迹步数',`${e.steps} steps`],['累计回报',e.total_return],['障碍半径',`${fmt(s.radius*100,1)} cm`],['场景难度',s.metrics.difficulty]].map(([a,b])=>`<div><dt>${a}</dt><dd>${escapeHTML(b)}</dd></div>`).join('');
+    const s=scenes[e.scene_id];$('episode-metrics').innerHTML=[['数据划分',names[e.split]],['轨迹来源',e.source],['轨迹步数',`${e.steps} steps`],['累计回报',e.total_return],['障碍半径',`${fmt(s.radius*100,1)} cm`],['场景难度',s.metrics.difficulty]].map(([a,b])=>`<div><dt>${a}</dt><dd>${escapeHTML(typeof b==='object'?JSON.stringify(b):b)}</dd></div>`).join('');
     detail.poses=[s.q0,...detail.qpos];detail.tips=detail.poses.map(q=>kinematics(q)[2]);detail.distances=detail.tips.map(p=>Math.hypot(p[0]-s.goal[0],p[1]-s.goal[1]));
     $('scrubber').max=detail.poses.length-1;$('scrubber').value=0;$('duration').textContent=`${fmt(e.steps*dt())} s`;
     drawFrame();
@@ -107,7 +119,7 @@ function drawFrame(){
 }
 function pause(){playing=false;$('play').textContent='▶';$('play').setAttribute('aria-label','播放轨迹');}
 function tick(time){if(playing&&detail){const interval=dt()*1000/Number($('speed').value);if(time-lastTick>=interval){const advance=Math.floor((time-lastTick)/interval);lastTick+=advance*interval;frame=Math.min(detail.poses.length-1,frame+advance);drawFrame();if(frame===detail.poses.length-1)pause();}}requestAnimationFrame(tick);}
-function renderConfig(){const groups={experiment:{seed:data.config.seed,device:data.config.device},...Object.fromEntries(Object.entries(data.config).filter(([k,v])=>v&&typeof v==='object'))};$('config-grid').innerHTML=Object.entries(groups).map(([key,values])=>`<article class="card"><h2>${key}</h2><dl>${Object.entries(values).map(([a,b])=>`<div><dt>${escapeHTML(a)}</dt><dd>${escapeHTML(b)}</dd></div>`).join('')}</dl></article>`).join('');}
+function renderConfig(){const groups={experiment:{seed:data.config.seed,device:data.config.device},...Object.fromEntries(Object.entries(data.config).filter(([k,v])=>v&&typeof v==='object'))};$('config-grid').innerHTML=Object.entries(groups).map(([key,values])=>`<article class="card"><h2>${key}</h2><dl>${Object.entries(values).map(([a,b])=>`<div><dt>${escapeHTML(a)}</dt><dd>${escapeHTML(typeof b==='object'?JSON.stringify(b):b)}</dd></div>`).join('')}</dl></article>`).join('');}
 $('split-tabs').addEventListener('click',event=>{const b=event.target.closest('button');if(b){split=b.dataset.split;updateFilters();}});
 $('difficulty').addEventListener('change',()=>{difficulty=$('difficulty').value;updateFilters();});
 function selectScene(event){const c=event.target.closest('[data-scene]');if(c){const e=filteredEpisodes().find(e=>e.scene_id===c.dataset.scene);if(e){selectEpisode(e);$('player').scrollIntoView({behavior:'smooth',block:'center'});}}}
@@ -123,4 +135,24 @@ $('download-episode').onclick=()=>{if(detail){const {poses,tips,distances,...raw
 $('export').onclick=()=>{const rows=filteredEpisodes();const fields=['episode_id','scene_id','split','source','steps','total_return','success','failure_reason'];const csv='\uFEFF'+[fields.join(','),...rows.map(e=>fields.map(k=>'"'+String(e[k]).replace(/"/g,'""')+'"').join(','))].join('\r\n');download(csv,`seed42-${split}-${difficulty}.csv`,'text/csv;charset=utf-8');};
 window.addEventListener('hashchange',navigate);
 document.addEventListener('visibilitychange',()=>{if(document.hidden){pause();}});
-(async()=>{try{const response=await fetch('/api/data');if(!response.ok)throw new Error(`HTTP ${response.status}`);data=await response.json();scenes=Object.fromEntries(Object.values(data.scenes).flat().map(s=>[s.scene_id,s]));$('nav-count').textContent=data.episodes.length;$('status').textContent='';renderConfig();navigate();updateFilters();requestAnimationFrame(tick);}catch(error){showReadError($('status'),()=>location.reload());}})();
+let refreshing=false;
+async function refreshData(){
+  if(refreshing)return;refreshing=true;$('refresh-data').disabled=true;$('refresh-data').textContent='正在读取…';
+  const previous=selected?.path;
+  try{
+    const response=await fetch('/api/data',{cache:'no-store'});if(!response.ok)throw new Error(`HTTP ${response.status}`);
+    const next=await response.json();data=next;
+    Object.keys(data.scenes).forEach((key,i)=>{names[key]??=key;colors[key]??=['#367d64','#90b29a','#91a5b8','#c3ab83','#af9db6'][i%5];});
+    scenes=Object.fromEntries(Object.values(data.scenes).flat().map(s=>[s.scene_id,s]));
+    if(split!=='all'&&!(split in data.scenes))split='all';
+    requestId++;pause();detail=null;selected=null;
+    $('nav-count').textContent=data.episodes.length;$('status').textContent='';
+    $('data-summary').textContent=`runs/${data.run} · ${Object.keys(data.scenes).length} 个划分 · ${data.episodes.length} 条轨迹 · 更新于 ${new Date(data.refreshed_at).toLocaleTimeString('zh-CN',{hour12:false})}`;
+    renderConfig();navigate();
+    const rows=filteredEpisodes();selected=rows.find(e=>e.path===previous)||null;updateFilters();
+    if(previous&&selected?.path===previous&&!detail)await selectEpisode(selected);
+  }catch(error){showReadError($('status'),refreshData);}
+  finally{refreshing=false;$('refresh-data').disabled=false;$('refresh-data').textContent='↻ 刷新目录数据';}
+}
+$('refresh-data').onclick=refreshData;
+refreshData();requestAnimationFrame(tick);

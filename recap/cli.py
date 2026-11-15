@@ -11,6 +11,7 @@ from .planning import rollout
 from .models import Model,returns,advantage,distribution_targets
 from .datasets import DATASET_SPLITS
 from .generation import generate_datasets,write_json
+from .evaluation import episode_metrics,difficulty_metrics
 
 
 def save_json(path,obj):
@@ -124,15 +125,60 @@ def fit(root,kind,cfg,resume=False):
     save_json(root/f'{kind}.history.json',history)
 
 
+def evaluate_policies(root,cfg,models=None,splits=None):
+    root=Path(root)
+    models=['bc','sft','recap'] if models is None else models
+    scenes=json.loads((root/'scenes.json').read_text())
+    selected=list(dict.fromkeys(splits)) if splits is not None else [name for name in scenes if name not in ('train','validation') and scenes[name]]
+    if not selected or any(name not in scenes or not scenes[name] for name in selected):
+        raise ValueError('Select nonempty datasets present in scenes.json')
+    for name in models:
+        if name not in ('bc','sft','recap'):
+            raise ValueError('Evaluate supports bc, sft, and recap policies')
+        if not (root/f'{name}.pt').is_file():
+            raise FileNotFoundError(root/f'{name}.pt')
+    value=load_model(root,'value',cfg) if (root/'value.pt').is_file() else None
+    report={}; env=ObstacleReach2D(cfg['env'])
+    try:
+        for name in models:
+            model=load_model(root,name,cfg); report[name]={}; all_episodes=[]
+            for split in selected:
+                with tqdm(scenes[split],desc=f'Evaluate {name}/{split}',unit='episode',dynamic_ncols=True) as progress:
+                    eps=[rollout(env,scene,policy(model),cfg['seed']+20000000+i,name) for i,scene in enumerate(progress)]
+                if value is not None: annotate(eps,value,cfg)
+                for ep in eps: store(root,split,name,ep)
+                metrics=episode_metrics(eps)
+                metrics['by_difficulty']=difficulty_metrics(eps,scenes[split])
+                report[name][split]=metrics
+                all_episodes.extend(eps)
+                tqdm.write(f"{name}/{split} | success {metrics['success_count']}/{metrics['episodes']} ({metrics['success_rate']:.1%})")
+                for difficulty,group in metrics['by_difficulty'].items():
+                    tqdm.write(f"  {difficulty} | {group['success_count']}/{group['episodes']} ({group['success_rate']:.1%})")
+            if name=='recap' and 'bc' in report:
+                for split in selected:
+                    report[name][split]['gain_over_bc']=report[name][split]['success_rate']-report['bc'][split]['success_rate']
+            save_json(root/f'evaluation.{name}.json',{name:report[name]})
+            overall=episode_metrics(all_episodes)
+            tqdm.write(f"{name} overall | success {overall['success_count']}/{overall['episodes']} ({overall['success_rate']:.1%})")
+        if len(models)>1: save_json(root/'evaluation.json',report)
+    finally:
+        env.close()
+    return report
+
+
 def main():
     p=argparse.ArgumentParser(); p.add_argument('command',choices=['generate','train','rollout','evaluate','plot','all'])
     p.add_argument('--config',default='configs/default.yaml'); p.add_argument('--run',default='runs/default')
-    p.add_argument('--model',choices=['bc','sft','value','recap'],default='bc'); p.add_argument('--resume',action='store_true')
+    p.add_argument('--model',choices=['bc','sft','value','recap'],
+                   help='Train this model or evaluate this policy. Defaults to bc for train and all policies for evaluate.')
+    p.add_argument('--resume',action='store_true')
     p.add_argument('--splits',nargs='+',choices=(*DATASET_SPLITS,'goal_ood','composition_ood'),
-                   help='Generate only these datasets. Combine with --resume to skip completed datasets.')
+                   help='Generate or evaluate only these datasets. Combine generate with --resume to skip completed datasets.')
     args=p.parse_args(); cfg=yaml.safe_load(Path(args.config).read_text()); root=Path(args.run); root.mkdir(parents=True,exist_ok=True)
-    if args.splits and args.command not in ('generate','all'):
-        p.error('--splits is supported by generate and all')
+    if args.splits and args.command not in ('generate','evaluate','all'):
+        p.error('--splits is supported by generate, evaluate, and all')
+    if args.command=='evaluate' and args.model=='value':
+        p.error('evaluate --model requires a policy model such as bc, sft, or recap')
     random.seed(cfg['seed']); np.random.seed(cfg['seed']); torch.manual_seed(cfg['seed'])
     torch.use_deterministic_algorithms(True)
     if (root/'config.json').exists() and json.loads((root/'config.json').read_text())!=cfg:
@@ -152,28 +198,9 @@ def main():
                         store(root,split,'rollout',ep)
         finally: env.close()
     def evaluate():
-        scenes=json.loads((root/'scenes.json').read_text()); report={}; env=ObstacleReach2D(cfg['env'])
-        value=load_model(root,'value',cfg)
-        try:
-            for name in ['bc','sft','recap']:
-                model=load_model(root,name,cfg); report[name]={}
-                for split in (name for name in scenes if name not in ('train','validation') and scenes[name]):
-                    with tqdm(scenes[split],desc=f'Evaluate {name}/{split}',unit='episode',dynamic_ncols=True) as progress:
-                        eps=[rollout(env,s,policy(model),cfg['seed']+20000000+i,name) for i,s in enumerate(progress)]
-                    annotate(eps,value,cfg)
-                    for ep in eps: store(root,split,name,ep)
-                    successes=[bool(e['success'][-1]) for e in eps]; n=len(eps); rate=float(np.mean(successes))
-                    center=(rate+1.96**2/(2*n))/(1+1.96**2/n); half=1.96*np.sqrt(rate*(1-rate)/n+1.96**2/(4*n*n))/(1+1.96**2/n)
-                    report[name][split]=dict(success_rate=rate,success_ci95=[center-half,center+half],
-                        collision_rate=float(np.mean(['collision' in str(e['failure_reason'][-1]) for e in eps])),
-                        timeout_rate=float(np.mean([e['truncated'][-1] for e in eps])),
-                        completion_steps=float(np.mean([len(e['reward']) for e in eps if e['success'][-1]])) if any(successes) else None,
-                        value_mae=float(np.mean(np.abs(np.concatenate([e['value_prediction']-e['mc_return'] for e in eps])))),
-                        scene_ids=[str(e['scene_id']) for e in eps],successes=successes)
-            for split in report['bc']:
-                report['recap'][split]['gain_over_bc']=report['recap'][split]['success_rate']-report['bc'][split]['success_rate']
-            save_json(root/'evaluation.json',report)
-        finally: env.close()
+        models=[args.model] if args.command=='evaluate' and args.model else None
+        selected=args.splits if args.command=='evaluate' else None
+        evaluate_policies(root,cfg,models=models,splits=selected)
     def plot():
         import matplotlib
         matplotlib.use('Agg')
@@ -207,7 +234,7 @@ def main():
                 progress.set_postfix_str(name)
                 action()
     elif args.command=='generate': generate()
-    elif args.command=='train': fit(root,args.model,cfg,args.resume)
+    elif args.command=='train': fit(root,args.model or 'bc',cfg,args.resume)
     elif args.command=='rollout': collect()
     elif args.command=='evaluate': evaluate()
     else: plot()

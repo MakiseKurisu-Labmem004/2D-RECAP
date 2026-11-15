@@ -5,6 +5,8 @@ import json
 import math
 import struct
 import zipfile
+import threading
+from datetime import datetime, timezone
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -47,23 +49,48 @@ def episode(path, fields):
 
 def build_index(run):
     scenes = json.loads((run / 'scenes.json').read_text(encoding='utf-8'))
+    config = json.loads((run / 'config.json').read_text(encoding='utf-8'))
+    scene_ids = {scene['scene_id'] for group in scenes.values() for scene in group}
     rows = []
     for path in sorted((run / 'data').glob('*/*/*.npz')):
         item = episode(path, ['scene_id', 'episode_id', 'success', 'reward', 'failure_reason', 'policy_version'])
+        if item['scene_id'] not in scene_ids:
+            raise ValueError(f'{path}: scene_id missing from scenes.json')
         relative = path.relative_to(run / 'data')
         rows.append(dict(path=relative.as_posix(), scene_id=item['scene_id'], episode_id=item['episode_id'],
                          split=relative.parts[0], source=relative.parts[1], steps=len(item['reward']),
                          success=bool(item['success'][-1]), total_return=sum(item['reward']),
                          failure_reason=item['failure_reason'][-1]))
     generation_path = run / 'generation.json'
-    return dict(run=run.name, config=json.loads((run / 'config.json').read_text(encoding='utf-8')),
+    difficulty_path = run / 'difficulty.json'
+    order = {key: i for i, key in enumerate(scenes)}
+    rows.sort(key=lambda row: (order[row['split']], row['source'], int(row['episode_id'].rsplit('-', 1)[-1]) if row['episode_id'].rsplit('-', 1)[-1].isdigit() else 0, row['path']))
+    return dict(run=run.name, config=config,
                 generation=json.loads(generation_path.read_text(encoding='utf-8')) if generation_path.exists() else {},
-                scenes=scenes, episodes=rows)
+                difficulty=json.loads(difficulty_path.read_text(encoding='utf-8')) if difficulty_path.exists() else {},
+                refreshed_at=datetime.now(timezone.utc).isoformat(), scenes=scenes, episodes=rows)
+
+
+class RunStore:
+    """Refresh the index when manifests or episode files change."""
+    def __init__(self, run):
+        self.run, self.signature, self.index = run, None, None
+        self.lock = threading.Lock()
+
+    def get(self):
+        with self.lock:
+            files = [self.run / name for name in ('config.json', 'scenes.json', 'generation.json', 'difficulty.json')]
+            files.extend(sorted((self.run / 'data').glob('*/*/*.npz')))
+            signature = tuple((str(p), p.stat().st_mtime_ns, p.stat().st_size) for p in files if p.exists())
+            if signature != self.signature:
+                index = build_index(self.run)
+                self.index, self.signature = index, signature
+            return self.index
 
 
 class Handler(SimpleHTTPRequestHandler):
-    def __init__(self, *args, run, index, **kwargs):
-        self.run, self.index = run, index
+    def __init__(self, *args, run, store, **kwargs):
+        self.run, self.store = run, store
         super().__init__(*args, directory=str(Path(__file__).parent), **kwargs)
 
     def send_json(self, value):
@@ -79,10 +106,10 @@ class Handler(SimpleHTTPRequestHandler):
         url = urlsplit(self.path)
         try:
             if url.path == '/api/data':
-                return self.send_json(self.index)
+                return self.send_json(self.store.get())
             if url.path == '/api/episode':
                 relative = parse_qs(url.query).get('path', [''])[0]
-                if relative not in {e['path'] for e in self.index['episodes']}:
+                if relative not in {e['path'] for e in self.store.get()['episodes']}:
                     return self.send_error(404)
                 return self.send_json(episode(self.run / 'data' / relative,
                     ['qpos', 'action', 'reward', 'clearance', 'success', 'failure_reason', 'scene_id', 'episode_id']))
@@ -102,8 +129,9 @@ if __name__ == '__main__':
     parser.add_argument('--port', type=int, default=8042)
     args = parser.parse_args()
     run = args.run.resolve()
-    index = build_index(run)
-    server = ThreadingHTTPServer(('127.0.0.1', args.port), partial(Handler, run=run, index=index))
+    store = RunStore(run)
+    index = store.get()
+    server = ThreadingHTTPServer(('127.0.0.1', args.port), partial(Handler, run=run, store=store))
     print(f'RECAP viewer: http://127.0.0.1:{args.port} | {len(index["episodes"])} episodes', flush=True)
     try:
         server.serve_forever()
