@@ -48,18 +48,36 @@ recap evaluate --model bc --run runs/seed42 --config runs/seed42/config.json --s
 
 单策略评测输出每个数据集、每种场景难度和所选场景总体的成功率，报告写入 `evaluation.bc.json`，轨迹写入 `data/<split>/bc`。已有 `value.pt` 时同时计算 Value 误差。省略 `--model` 时评测 BC、SFT、RECAP 并写入 `evaluation.json`，同时保存各自独立报告。
 
-新训练的 BC 默认屏蔽观测中的两维关节速度，避免依赖专家轨迹中“速度与动作高度相关”的捷径而无法从静止状态启动。环境与 NPZ 仍保存完整 11D 状态，Value 始终使用速度。SFT 继承 BC 的速度设置，新训练的 RECAP 默认同样屏蔽速度。需要做消融时，可在新运行的 YAML 中设置 `train.policy_use_velocity: true`。
+环境观测、保存的 `observation` / `next_observation` 和 BC、SFT、Value、RECAP 全部使用 **9D 观测**，彻底移除两维关节速度。RECAP 追加三维条件后网络输入为 12D。旧的 `train.policy_use_velocity` 设置已移除。MuJoCo 仍正常模拟物理速度与惯性，速度不暴露给模型或保存到观测中。由于相同姿态可能具有不同物理速度，9D 观测不再包含完整动力学状态，Value 预测也受此信息限制。
 
-BC 在第 1 轮、每 10 轮和最后一轮对全部 validation 场景执行闭环评测，优先按成功率、成功率相同时按 validation MSE 保存 `bc.pt`；`bc.last.pt` 保存最近一轮。`bc.history.json` 的相应记录增加 `validation_success_rate`。可用 `train.validation_rollout_interval` 调整间隔，设为 `0` 时仅按 MSE 选模。测试集合不参与选择。SFT、Value 和 RECAP 仍按各自 validation loss 选模。
+默认训练使用 **AdamW、学习率 0.001、weight_decay=0.0001、8000 个优化器更新步**。`train.max_steps` 非空时优先于 `epochs`；一个 step 指一个 batch 的参数更新。默认每 `train.validation_steps: 500` 步验证一次，第 1 步和最后一步也验证。BC 对全部 validation 场景执行闭环评测，优先按成功率、成功率相同时按 validation MSE 保存 `bc.pt`；SFT、Value 和 RECAP 按各自 validation loss 选模。测试集合不参与选择。
 
-速度设置和选模间隔保存在 checkpoint 中。加载旧 checkpoint 保留原有速度输入；`--resume` 也保留原训练行为。要对已有数据应用 BC 修复，重新训练并评测：
+`train.checkpoint_steps: 500` 控制额外快照间隔，写入 `checkpoints/bc.step00000500.pt` 等文件；验证或快照时更新 `bc.last.pt`。快照包含优化器、随机状态和当前数据乱序位置，`--resume` 可从最近保存点精确续训。`bc.history.json` 保存 step、epoch、loss、验证成功率及各难度指标。将 `max_steps` 设为 `null` 或省略时仍使用 epoch 训练；此模式由 `validation_rollout_interval` 控制 BC 闭环验证间隔，默认 10 轮，设为 0 时仅按 MSE 选模。smoke 使用 2 轮训练。
+
+旧 11D NPZ 在训练读取时会自动移除速度列；要使磁盘上的数据也变为 9D，可复制转换到新目录，无需重新生成。迁移覆盖 `data` 下的所有 NPZ，保留动作、奖励、姿态、场景和逐帧对应关系；复制原运行配置和场景/生成清单，移除过时的速度开关。原目录保持不变，新目录不复制旧权重、训练历史或评测报告。旧的 11D 权重及断点需要重新训练，加载或续训时会明确报错。
 
 ```bash
-recap train --model bc --run runs/seed42 --config runs/seed42/config.json
-recap evaluate --model bc --run runs/seed42 --config runs/seed42/config.json --splits id
+recap migrate --run runs/seed42 --output-run runs/seed42-9d --train-config configs/default.yaml
+recap train --model bc --run runs/seed42-9d --config runs/seed42-9d/config.json
+recap evaluate --model bc --run runs/seed42-9d --config runs/seed42-9d/config.json --splits id
+# 用同一份数据创建学习率更小的独立实验
+recap migrate --run runs/seed42 --output-run runs/seed42-9d-lr1e4 --train-config configs/default.yaml --lr 0.0001
+recap train --model bc --run runs/seed42-9d-lr1e4 --config runs/seed42-9d-lr1e4/config.json
 ```
 
-这会更新该目录的 BC 权重与训练历史。后续实验应使用新 BC 重新采集 rollout，再训练 SFT、Value 和 RECAP。
+`migrate` 读取源目录的 `config.json`；`--train-config` 只合并指定 YAML 的 train 段，保留源数据的环境、场景、种子和配比。`--lr` 可再覆盖学习率。不提供覆盖选项时沿用源训练配置。目标目录必须尚不存在；旧运行保存的配置不会自动变成新默认值。9D checkpoint 可用 `--resume` 续训，续训保留原优化器设置。后续实验应使用新 BC 重新采集 rollout，再训练 SFT、Value 和 RECAP。
+
+固定数据、seed、AdamW 和权重衰减，对比三种学习率，各训练 10000 步并每 500 步验证及保存快照：
+
+```bash
+python scripts/sweep_bc.py --run runs/seed42 --output runs/bc-sweep-10k --lrs 0.0003 0.001 0.003 --steps 10000 --interval 500
+```
+
+脚本生成各组独立运行目录、`sweep.json` 和 `learning_curves.png`。依据 validation 闭环成功率选出配置与 checkpoint，再仅对选定模型执行 ID 测试；单次 seed 的最佳结果只代表本次比较范围。脚本默认使用可用 GPU，`--device cpu --threads 1` 可指定 CPU。
+
+本地 seed42 的三组 10000 步对照已完成：lr=0.001 在第 8000 步取得最佳 validation 成功率 73.3%，选定后 ID 成功率为 66.0%。完整设置、曲线和难度指标见 [实验记录](docs/experiments/bc_adamw_10k_seed42.md)。
+
+后续 [20000 步对照](docs/experiments/bc_adamw_20k_seed42.md) 固定 batch size=256，比较 lr=0.001 与 0.0005：两组最佳 validation 均为 73.3%，按较低 MSE 选中 lr=0.0005 的第 14000 步 checkpoint，ID 为 34/50（68%）。训练更久未持续改善闭环成功率，仍应保留中间最优模型。
 
 `recap all` 顺序完成上述步骤。默认 200 条训练专家轨迹、400 条自主轨迹，另有独立 validation 和六个测试集合。生成成本可能较高，先运行 smoke。生成器达到尝试预算仍不足时会报错，不能把规划失败解释为场景不可解。已有场景 manifest 不允许覆盖；不同实验配置使用不同目录。多训练种子修改 YAML seed 并使用各自目录；如需跨种子严格共享测试集，应在实验前显式准备共享 manifest，目前没有跨运行聚合命令。
 
@@ -72,7 +90,7 @@ recap evaluate --model bc --run runs/seed42 --config runs/seed42/config.json --s
 
 每条 NPZ 独立保存 episode，禁止跨 episode 拼接 TD 窗口；场景参数保存在 `scenes.json`，通过 scene_id 关联。`data/<split>/expert` 中的测试专家只用于可解性证明。train 和 validation 的自主数据仅在各自场景中采集。所有评测策略共享同一测试列表，报告保存逐场景结果、Wilson 成功率区间和 RECAP 相对 BC 增益。
 
-输入为明确列举的 **11D**，原规格中的 12D 不额外虚构状态。条件策略使用三态 one-hot（低/高/null），因此网络输入 14D。速度除以 10，其余状态使用米、sin/cos；目标与障碍物在同一世界坐标系。动作单位 rad，默认 ±0.05。
+观测明确为 **9D**：两关节的 sin（2D）、cos（2D）、目标坐标（2D）、障碍物中心（2D）及半径（1D）。条件策略使用三态 one-hot（低/高/null），因此网络输入 12D。目标与障碍物在同一世界坐标系，位置和半径使用米；动作单位 rad，默认 ±0.05。
 
 200 步任务最差回报为 -349，因此统一使用 horizon+149 归一化，避免原文针对 100 步的 249 尺度造成越界。成功终止奖励 0，其余普通步 -1，碰撞、约束和超时终止 -150。gamma=1，所有终止（含超时）取消 bootstrap。默认 TD horizon=10。quantile 筛选只表示排名，不能称为正优势。
 

@@ -14,6 +14,7 @@ from .datasets import DATASET_SPLITS, LEGACY_DATASET_SPLITS
 from .difficulty import difficulty_quotas
 from .geometry import points
 from .planning import ScenarioGenerator, ik, local_medium_detour, plan, safe_edge
+from .observations import without_velocity, convert_episode
 
 
 def write_json(path, value):
@@ -96,12 +97,12 @@ def recover_scene(episode, split, cfg):
         return json.loads(episode['scene_json'].item())
     if not episode['success'][-1] or float(episode['exploration']) != 0:
         raise ValueError('Recovery requires successful, noise-free expert trajectories')
-    obs = episode['observation'][0]
+    obs = without_velocity(episode['observation'][0])
     start = episode['applied_command'][0] - episode['action'][0]
     if not np.allclose(np.r_[np.sin(start), np.cos(start)], obs[:4], atol=2e-6, rtol=0):
         raise ValueError('Cannot recover the initial joint angles from saved commands')
     scene = dict(scene_id=episode['scene_id'].item(), split=split, q0=start.tolist(),
-                 goal=obs[6:8].tolist(), obstacle=obs[8:10].tolist(), radius=float(obs[10]))
+                 goal=obs[4:6].tolist(), obstacle=obs[6:8].tolist(), radius=float(obs[8]))
     goals = ik(np.array(scene['goal']), cfg['env']['joint_limit'])
     goals.sort(key=lambda goal: np.linalg.norm(goal - episode['qpos'][-1]))
     path = path_from_controls(episode, scene, start, cfg)
@@ -138,7 +139,7 @@ def store_expert(root, split, scene, episode):
     try:
         with NamedTemporaryFile(dir=folder, delete=False) as stream:
             temporary = Path(stream.name)
-            np.savez_compressed(stream, **{**episode, 'scene_json': np.array(json.dumps(scene))})
+            np.savez_compressed(stream, **{**convert_episode(episode), 'scene_json': np.array(json.dumps(scene))})
         temporary.replace(output)
     finally:
         if temporary is not None:

@@ -3,6 +3,7 @@ import gymnasium as gym
 import mujoco
 
 from .geometry import clearance, points
+from .observations import OBSERVATION_DIM
 
 
 class ObstacleReach2D(gym.Env):
@@ -13,7 +14,7 @@ class ObstacleReach2D(gym.Env):
         self.render_mode = render_mode
         self.viewer = self.renderer = None
         self.action_space = gym.spaces.Box(-c['action_limit'], c['action_limit'], (2,), np.float32)
-        self.observation_space = gym.spaces.Box(-np.inf, np.inf, (11,), np.float32)
+        self.observation_space = gym.spaces.Box(-np.inf, np.inf, (OBSERVATION_DIM,), np.float32)
         self.model = mujoco.MjModel.from_xml_string(f'''<mujoco>
         <option timestep="{c['timestep']}" gravity="0 0 0"/>
         <default><joint type="hinge" axis="0 0 1" damping="{c['damping']}" range="{-c['joint_limit']} {c['joint_limit']}"/>
@@ -29,7 +30,7 @@ class ObstacleReach2D(gym.Env):
         self.data = mujoco.MjData(self.model)
 
     def obs(self):
-        return np.concatenate([np.sin(self.data.qpos), np.cos(self.data.qpos), self.data.qvel/10,
+        return np.concatenate([np.sin(self.data.qpos), np.cos(self.data.qpos),
                                self.scene['goal'], self.scene['obstacle'], [self.scene['radius']]]).astype(np.float32)
 
     def reset(self, seed=None, options=None):

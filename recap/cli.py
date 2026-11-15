@@ -13,6 +13,8 @@ from .models import Model,returns,advantage,distribution_targets
 from .datasets import DATASET_SPLITS
 from .generation import generate_datasets,write_json
 from .evaluation import episode_metrics,difficulty_metrics
+from .observations import OBSERVATION_DIM,convert_episode
+from .training import make_optimizer,train_steps,positive_integer,save_checkpoint
 
 
 def save_json(path,obj):
@@ -22,12 +24,16 @@ def save_json(path,obj):
 def episodes(root,split,source='expert'):
     paths=sorted((root/'data'/split/source).glob('*.npz'))
     with tqdm(paths,desc=f'Load {split}/{source}',unit='episode',leave=False,dynamic_ncols=True) as progress:
-        return [dict(np.load(p,allow_pickle=False)) for p in progress]
+        result=[]
+        for path in progress:
+            with np.load(path,allow_pickle=False) as archive:
+                result.append(convert_episode(dict(archive)))
+        return result
 
 
 def store(root,split,source,ep):
     p=root/'data'/split/source; p.mkdir(parents=True,exist_ok=True)
-    np.savez_compressed(p/f"{ep['episode_id']}.npz",**ep)
+    np.savez_compressed(p/f"{ep['episode_id']}.npz",**convert_episode(ep))
 
 
 def device(cfg):
@@ -36,9 +42,17 @@ def device(cfg):
 
 def load_model(root,name,cfg):
     ck=torch.load(root/f'{name}.pt',map_location=device(cfg),weights_only=False)
+    check_checkpoint_observations(ck,name)
     model_cfg=ck.get('config',cfg)
     model=Model(name,model_cfg['train'],model_cfg['env']['action_limit']).to(device(cfg))
     model.load_state_dict(ck['model']); model.eval(); return model
+
+
+def check_checkpoint_observations(checkpoint,kind):
+    expected=OBSERVATION_DIM+(3 if kind=='recap' else 0)
+    if checkpoint['model']['net.0.weight'].shape[1]!=expected:
+        raise ValueError(f'{kind} checkpoint uses the old observation layout. '
+                         'Retrain with 9D observations; use recap migrate to copy existing data to a new run.')
 
 
 def policy(model):
@@ -64,16 +78,14 @@ def fit(root,kind,cfg,resume=False):
     tc=cfg['train']; dev=device(cfg)
     last=root/f'{kind}.last.pt'
     checkpoint=torch.load(last,map_location=dev,weights_only=False) if resume and last.exists() else None
+    if checkpoint: check_checkpoint_observations(checkpoint,kind)
     source=load_model(root,'bc',cfg) if kind=='sft' else None
     saved_train=checkpoint.get('config',{}).get('train',{}) if checkpoint else {}
-    if kind!='value':
-        saved_velocity=saved_train.get('policy_use_velocity',True)
-        if checkpoint and 'policy_use_velocity' in tc and tc['policy_use_velocity']!=saved_velocity:
-            raise ValueError('Resume with the checkpoint policy_use_velocity setting')
-        if checkpoint: velocity_default=saved_velocity
-        elif source is not None: velocity_default=source.use_velocity
-        else: velocity_default=False
-        tc.setdefault('policy_use_velocity',velocity_default)
+    tc.pop('policy_use_velocity',None)
+    step_mode=tc.get('max_steps') is not None
+    if step_mode: positive_integer(tc['max_steps'],'max_steps')
+    if checkpoint and step_mode!=('train_state' in checkpoint):
+        raise ValueError('Resume with the checkpoint training budget mode (steps or epochs)')
     interval_default=saved_train.get('validation_rollout_interval',0) if checkpoint else 10
     if kind=='bc' and checkpoint and tc.get('validation_rollout_interval',interval_default)!=interval_default:
         raise ValueError('Resume with the checkpoint validation_rollout_interval setting')
@@ -111,7 +123,8 @@ def fit(root,kind,cfg,resume=False):
     x,y,labels=tensors(train); vx,vy,vl=tensors(val)
     model=Model(kind,tc,cfg['env']['action_limit']).to(dev)
     if source is not None: model.load_state_dict(source.state_dict())
-    optimizer=torch.optim.Adam(model.parameters(),lr=tc['lr']); start=0; best=float('inf'); history=[]
+    optimizer=make_optimizer(model,tc,saved_train if checkpoint else None)
+    start=0; best=float('inf'); history=[]
     best_success=-1.
     if checkpoint:
         ck=checkpoint; model.load_state_dict(ck['model']); optimizer.load_state_dict(ck['optimizer'])
@@ -128,12 +141,14 @@ def fit(root,kind,cfg,resume=False):
         if training: condition=torch.where(torch.rand(len(a),device=dev)<tc['dropout'],null,condition)
         return model.nll(a,b,null).mean()+tc['alpha']*(l*model.nll(a,b,condition)).mean()+tc['low_weight']*((1-l)*model.nll(a,b,condition)).mean()
     validation_scenes=[]
-    if validation_interval:
+    if validation_interval or (step_mode and kind=='bc'):
         manifest=json.loads((root/'scenes.json').read_text())
         validation_scenes=manifest.get('validation',[])
         if not validation_scenes: raise ValueError('BC closed-loop validation requires validation scenes')
-    if kind!='value':
-        tqdm.write(f'{kind} policy_use_velocity={model.use_velocity}, validation_rollout_interval={validation_interval}')
+    if step_mode:
+        train_steps(root,kind,cfg,model,optimizer,(x,y,labels),(vx,vy,vl),loss,validation_scenes,policy,checkpoint)
+        return
+    tqdm.write(f'{kind} observation_dim={OBSERVATION_DIM}, validation_rollout_interval={validation_interval}')
     with tqdm(range(start,tc['epochs']),total=tc['epochs'],initial=start,
               desc=f'Train {kind}',unit='epoch',dynamic_ncols=True) as epochs:
         for epoch in epochs:
@@ -162,8 +177,8 @@ def fit(root,kind,cfg,resume=False):
             else: best=min(best,validation)
             ck=dict(model=model.state_dict(),optimizer=optimizer.state_dict(),epoch=epoch,best=best,history=history,
                     best_success=best_success,rng=torch.get_rng_state(),cuda_rng=torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,config=cfg)
-            torch.save(ck,last)
-            if improved: torch.save(ck,root/f'{kind}.pt')
+            save_checkpoint(last,ck)
+            if improved: save_checkpoint(root/f'{kind}.pt',ck)
             epochs.set_postfix(train=f'{total/len(x):.5f}',validation=f'{validation:.5f}')
             tqdm.write(f'{kind} {history[-1]}')
     save_json(root/f'{kind}.history.json',history)
@@ -211,14 +226,27 @@ def evaluate_policies(root,cfg,models=None,splits=None):
 
 
 def main():
-    p=argparse.ArgumentParser(); p.add_argument('command',choices=['generate','train','rollout','evaluate','plot','all'])
+    p=argparse.ArgumentParser(); p.add_argument('command',choices=['generate','train','rollout','evaluate','plot','all','migrate'])
     p.add_argument('--config',default='configs/default.yaml'); p.add_argument('--run',default='runs/default')
     p.add_argument('--model',choices=['bc','sft','value','recap'],
                    help='Train this model or evaluate this policy. Defaults to bc for train and all policies for evaluate.')
     p.add_argument('--resume',action='store_true')
+    p.add_argument('--output-run',help='Destination for migrate: a new run with 9D trajectory data and no old checkpoints.')
+    p.add_argument('--lr',type=float,help='Learning rate in the new run created by migrate.')
+    p.add_argument('--train-config',help='For migrate: merge the train section of this YAML into the new run configuration.')
     p.add_argument('--splits',nargs='+',choices=(*DATASET_SPLITS,'goal_ood','composition_ood'),
                    help='Generate or evaluate only these datasets. Combine generate with --resume to skip completed datasets.')
-    args=p.parse_args(); cfg=yaml.safe_load(Path(args.config).read_text()); root=Path(args.run); root.mkdir(parents=True,exist_ok=True)
+    args=p.parse_args()
+    if args.command=='migrate':
+        if not args.output_run: p.error('migrate requires --output-run')
+        if args.model or args.splits or args.resume: p.error('migrate does not support --model, --splits, or --resume')
+        from .migration import migrate_run
+        overrides=yaml.safe_load(Path(args.train_config).read_text())['train'] if args.train_config else None
+        migrate_run(args.run,args.output_run,lr=args.lr,train_overrides=overrides)
+        return
+    if args.output_run or args.lr is not None or args.train_config:
+        p.error('--output-run, --lr, and --train-config are supported only by migrate')
+    cfg=yaml.safe_load(Path(args.config).read_text()); root=Path(args.run); root.mkdir(parents=True,exist_ok=True)
     if args.splits and args.command not in ('generate','evaluate','all'):
         p.error('--splits is supported by generate, evaluate, and all')
     if args.command=='evaluate' and args.model=='value':

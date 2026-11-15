@@ -35,7 +35,10 @@ def test_environment_timeout_and_action(cfg):
     env=ObstacleReach2D(c)
     try:
         o,_=env.reset(seed=1)
-        assert o.shape==(11,)
+        assert o.shape==(9,) and env.observation_space.contains(o)
+        env.data.qvel[:]=[2.,-3.]
+        np.testing.assert_array_equal(env.obs(),o)
+        env.data.qvel[:]=0
         q=env.data.qpos.copy()
         _,r,term,trunc,info=env.step(np.zeros(2))
         np.testing.assert_allclose(info['applied_command'],q)
@@ -52,7 +55,7 @@ def test_collision(cfg):
     finally: env.close()
 
 def test_models(cfg):
-    x=torch.randn(8,11)
+    x=torch.randn(8,9)
     for kind in ['bc','recap','value']:
         m=Model(kind,cfg['train'],.05)
         if kind=='value':

@@ -132,7 +132,8 @@ def test_failed_json_write_preserves_old_file_and_removes_temporary(tmp_path, mo
     assert list(tmp_path.iterdir()) == [path]
 
 
-def test_recover_old_episode_verifies_expert_actions():
+@pytest.mark.parametrize('legacy', [False, True])
+def test_recover_old_episode_verifies_expert_actions(legacy):
     cfg = yaml.safe_load(open('configs/default.yaml'))
     start = np.array([0., 1.])
     target = np.array([.2, 1.])
@@ -140,6 +141,8 @@ def test_recover_old_episode_verifies_expert_actions():
     before = np.vstack([start, qpos[:-1]])
     actions = np.clip(target - before, -.05, .05)
     obs = np.r_[np.sin(start), np.cos(start), [0., 0.], points(target)[-1], [-.5, -.5], .07].astype(np.float32)
+    if not legacy:
+        obs = np.r_[obs[:4], obs[6:]]
     episode = dict(scene_id=np.array('train-42-0'), episode_id=np.array('expert-42'),
                    observation=np.tile(obs, (5, 1)), applied_command=before + actions,
                    action=actions, qpos=qpos, exploration=np.array(0.),

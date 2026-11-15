@@ -2,6 +2,7 @@ import numpy as np
 import torch
 from torch import nn
 from torch.nn import functional as F
+from .observations import OBSERVATION_DIM
 
 
 def returns(rewards,scale):
@@ -30,9 +31,7 @@ def distribution_targets(y,bins):
 class Model(nn.Module):
     def __init__(self,kind,cfg,limit):
         super().__init__(); self.kind=kind; self.limit=limit; self.scalar=cfg['scalar_value']
-        # Old checkpoints retain velocity; new actor fits set this flag explicitly.
-        self.use_velocity=kind=='value' or cfg.get('policy_use_velocity',True)
-        size=14 if kind=='recap' else 11
+        size=OBSERVATION_DIM+3 if kind=='recap' else OBSERVATION_DIM
         layers=[]
         for _ in range(cfg['depth']):
             layers += [nn.Linear(size,cfg['width']),nn.SiLU()]; size=cfg['width']
@@ -40,8 +39,8 @@ class Model(nn.Module):
         self.net=nn.Sequential(*layers,nn.Linear(size,output))
         self.register_buffer('support',torch.linspace(-1,0,cfg['bins']))
     def forward(self,obs,condition=None):
-        if not self.use_velocity:
-            obs=torch.cat([obs[...,:4],torch.zeros_like(obs[...,4:6]),obs[...,6:]],-1)
+        if obs.shape[-1]!=OBSERVATION_DIM:
+            raise ValueError(f'Models require {OBSERVATION_DIM}D observations without joint velocity')
         if self.kind=='recap':
             if condition is None: condition=torch.full((len(obs),),2,device=obs.device,dtype=torch.long)
             obs=torch.cat([obs,F.one_hot(condition,3).float()],-1)
