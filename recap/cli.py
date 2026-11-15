@@ -181,8 +181,14 @@ def fit(root,kind,cfg,resume=False):
                             results=[rollout(env,scene,policy(model),cfg['seed']+30000000+i,'bc-validation')
                                      for i,scene in enumerate(progress)]
                     finally: env.close()
-                    success=float(np.mean([ep['success'][-1] for ep in results]))
-                    history[-1]['validation_success_rate']=success
+                    metrics=episode_metrics(results)
+                    success=metrics['success_rate']
+                    history[-1].update(validation_success_rate=success,validation_collision_rate=metrics['collision_rate'],
+                                       validation_timeout_rate=metrics['timeout_rate'],
+                                       validation_by_difficulty=difficulty_metrics(results,validation_scenes))
+                    if 'strict_success_rate' in metrics:
+                        history[-1].update(validation_strict_success_rate=metrics['strict_success_rate'],
+                                           validation_tolerance_only_success_count=metrics['tolerance_only_success_count'])
                     improved=success>best_success or (success==best_success and validation<best)
                     if improved: best_success=success; best=validation
             else: best=min(best,validation)
@@ -222,6 +228,10 @@ def evaluate_policies(root,cfg,models=None,splits=None):
                 report[name][split]=metrics
                 all_episodes.extend(eps)
                 tqdm.write(f"{name}/{split} | success {metrics['success_count']}/{metrics['episodes']} ({metrics['success_rate']:.1%})")
+                if 'strict_success_count' in metrics and float(eps[0]['strict_success_distance']) < float(eps[0]['success_distance']):
+                    tqdm.write(f"  strict {float(eps[0]['strict_success_distance'])*100:g} cm | success "
+                               f"{metrics['strict_success_count']}/{metrics['episodes']} ({metrics['strict_success_rate']:.1%}); "
+                               f"tolerance-only {metrics['tolerance_only_success_count']}")
                 for difficulty,group in metrics['by_difficulty'].items():
                     tqdm.write(f"  {difficulty} | {group['success_count']}/{group['episodes']} ({group['success_rate']:.1%})")
             if name=='recap' and 'bc' in report:

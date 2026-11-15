@@ -64,14 +64,14 @@ def read_json(path, default):
     return json.loads(path.read_text(encoding='utf-8')) if path.exists() else default
 
 
-def matches_expert(path, episode, start, limit, cfg=None):
+def matches_expert(path, episode, start, limit, cfg=None, scene=None):
     state = 1
     before = np.vstack([start, episode['qpos'][:-1]])
     controller = str(episode.get('expert_controller', 'waypoint'))
     if controller != 'waypoint':
         if cfg is None:
             raise ValueError('Smooth expert verification requires its saved configuration')
-        expert = make_expert(path, {**cfg, 'planner': {**cfg['planner'], 'expert_controller': controller}})
+        expert = make_expert(path, {**cfg, 'planner': {**cfg['planner'], 'expert_controller': controller}}, scene)
         for pose, action in zip(before, episode['action']):
             env = SimpleNamespace(data=SimpleNamespace(qpos=pose))
             if not np.allclose(expert(None, env), action, atol=3e-6, rtol=0):
@@ -108,9 +108,11 @@ def recover_expert_path(episode, scene, cfg):
     start = np.asarray(scene['q0'])
     if 'expert_path' in episode:
         path = np.asarray(episode['expert_path'])
-        if (not np.allclose(path[0], start, atol=2e-6, rtol=0)
+        if (path.ndim!=2 or path.shape[1]!=2 or len(path)<2 or not np.isfinite(path).all()
+                or not np.allclose(path[0], start, atol=2e-6, rtol=0)
+                or not np.allclose(points(path[-1])[-1],scene['goal'],atol=2e-6,rtol=0)
                 or not all(safe_edge(a, b, scene, cfg) for a, b in zip(path[:-1], path[1:]))
-                or not matches_expert(path, episode, start, cfg['env']['action_limit'], cfg)):
+                or not matches_expert(path, episode, start, cfg['env']['action_limit'], cfg, scene)):
             raise ValueError('Saved expert path does not match the trajectory')
         return path
     path = path_from_controls(episode, scene, start, cfg)
@@ -136,12 +138,20 @@ def recover_scene(episode, split, cfg):
     obs = without_velocity(episode['observation'][0])
     start = episode['applied_command'][0] - episode['action'][0]
     if not np.allclose(np.r_[np.sin(start), np.cos(start)], obs[:4], atol=2e-6, rtol=0):
-        raise ValueError('Cannot recover the initial joint angles from saved commands')
+        # Near a joint limit the requested target can be clipped, so target-action
+        # is no longer the initial pose. Sin/cos is unambiguous for limits < pi.
+        candidate=np.arctan2(obs[:2],obs[2:4]).astype(float)
+        expected=np.clip(candidate+np.clip(episode['action'][0],-cfg['env']['action_limit'],cfg['env']['action_limit']),
+                         -cfg['env']['joint_limit'],cfg['env']['joint_limit'])
+        if cfg['env']['joint_limit']>=np.pi or not np.allclose(expected,episode['applied_command'][0],atol=2e-6,rtol=0):
+            raise ValueError('Cannot recover the initial joint angles from saved commands')
+        start=candidate
     scene = dict(scene_id=episode['scene_id'].item(), split=split, q0=start.tolist(),
                  goal=obs[4:6].tolist(), obstacle=obs[6:8].tolist(), radius=float(obs[8]))
     path = recover_expert_path(episode, scene, cfg)
     direct = safe_edge(start, path[-1], scene, cfg)
-    length = float(np.linalg.norm(np.diff(path, axis=0), axis=1).sum())
+    length = (make_expert(path,cfg,scene).trajectory.length if str(episode.get('expert_controller','waypoint'))=='spline'
+              else float(np.linalg.norm(np.diff(path, axis=0), axis=1).sum()))
     ratio = length / max(np.linalg.norm(path[-1] - start), 1e-8)
     gap = float(episode['clearance'].min())
     difficulty = 'easy' if direct else 'hard' if (

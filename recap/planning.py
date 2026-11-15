@@ -5,7 +5,8 @@ from .env import clearance, points, ObstacleReach2D
 from .sampling import sample_scene
 from .difficulty import DIFFICULTIES,difficulty_quotas
 from .proposals import propose_obstruction
-from .controllers import make_expert
+from .controllers import make_expert,expert_fits_budget
+from .splines import UnsafeSplineError
 
 
 def ik(goal, limit):
@@ -111,13 +112,17 @@ def rollout(env,scene,policy,seed,version,noise=0.,limit=None):
                          truncated=trunc,success=info['success'],failure_reason=info['failure_reason'],
                          applied_command=info['applied_command'],step_index=t,timestamp=time.time(),
                          qpos=env.data.qpos.copy(),clearance=info['clearance'],distance=info['distance'],
-                         goal_hold_steps=env.held))
+                         goal_hold_steps=env.held,control_commands=info['control_commands'],
+                         substep_qpos=info['substep_qpos'],executed_substeps=info['executed_substeps']))
         obs=nxt
         if term or trunc: break
     ep={k:np.asarray([row[k] for row in rows]) for k in rows[0]}
     ep.update(scene_id=np.array(scene['scene_id']),episode_id=np.array(f'{version}-{seed}'),seed=np.array(seed),
               policy_version=np.array(version),action_source=np.array('expert' if version=='expert' else 'policy'),
-              exploration=np.array(noise),success_distance=np.array(env.cfg['success_distance']))
+              exploration=np.array(noise),success_distance=np.array(env.cfg['success_distance']),
+              strict_success_distance=np.array(min(env.cfg['success_distance'],env.cfg.get('strict_success_distance',.03))),
+              goal_hold_required=np.array(env.cfg['hold']),
+              control_dt=np.array(env.cfg['timestep']*env.cfg['substeps']),physics_timestep=np.array(env.cfg['timestep']))
     return ep
 
 
@@ -190,20 +195,35 @@ class ScenarioGenerator:
                         ):
                             reason='difficulty_quota_full'
                             continue
-                        expert=make_expert(path,self.cfg)
+                        try: expert=make_expert(path,self.cfg,scene)
+                        except UnsafeSplineError:
+                            reason='spline_infeasible'
+                            continue
+                        if not expert_fits_budget(expert,self.cfg):
+                            reason='spline_too_long'
+                            continue
                         ep=rollout(env,scene,expert,seed+attempt,'expert',limit=self.cfg['planner']['expert_limit'])
                         if not ep['success'][-1]: continue
-                        if expert.kind=='quintic':
+                        if expert.kind in ('quintic','spline'):
                             completed=completed_goal_path(path,ep,scene,self.cfg)
                             if completed.shape!=path.shape or not np.allclose(completed,path,atol=1e-8,rtol=0):
                                 path=completed
-                                expert=make_expert(path,self.cfg)
+                                try: expert=make_expert(path,self.cfg,scene)
+                                except UnsafeSplineError:
+                                    reason='spline_infeasible'
+                                    continue
+                                if not expert_fits_budget(expert,self.cfg):
+                                    reason='spline_too_long'
+                                    continue
                                 ep=rollout(env,scene,expert,seed+attempt,'expert',limit=self.cfg['planner']['expert_limit'])
                                 if not ep['success'][-1]: continue
-                            length=float(np.linalg.norm(np.diff(path,axis=0),axis=1).sum())
+                            length=expert.trajectory.length if expert.kind=='spline' else float(np.linalg.norm(np.diff(path,axis=0),axis=1).sum())
                             ratio=length/max(np.linalg.norm(path[-1]-q0),1e-8)
                             direct=safe_edge(q0,path[-1],scene,self.cfg)
                         ep.update(expert_path=path,expert_controller=np.array(expert.kind))
+                        if expert.kind=='spline':
+                            ep.update(expert_spline_blend=np.array(expert.trajectory.blend),
+                                      expert_spline_duration=np.array(expert.trajectory.duration))
                         gap=float(ep['clearance'].min())
                         difficulty='easy' if direct else 'hard' if ratio>=self.cfg['planner']['hard_ratio'] and gap<self.cfg['planner']['hard_clearance'] else 'medium'
                         if quotas is not None and counts[difficulty]>=quotas[difficulty]:

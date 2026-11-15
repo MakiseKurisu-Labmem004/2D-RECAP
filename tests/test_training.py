@@ -31,6 +31,7 @@ def test_all_models_use_nine_observations(config, kind):
 
 def test_loading_uses_checkpoint_architecture(tmp_path, config):
     saved = copy.deepcopy(config)
+    saved['env']['action_limit'] = .05
     model = Model('bc', saved['train'], .05)
     torch.save(dict(model=model.state_dict(), config=saved), tmp_path / 'bc.pt')
     runtime = copy.deepcopy(config)

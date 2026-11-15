@@ -83,38 +83,51 @@ python scripts/sweep_bc.py --run runs/seed42 --output runs/bc-sweep-10k --lrs 0.
 
 ## 平滑专家与近目标纠偏
 
-新配置使用 `planner.expert_controller: quintic`：在避障检查通过的每条关节空间线段上做五次时间标定，使参考轨迹在路点处的速度、加速度归零，再用位置执行器跟踪并补偿关节阻尼。默认参考速度上限为 0.6 rad/s、参考加速度上限为 2 rad/s²，路点跟踪误差小于 0.003 rad 后切换。它约束参考轨迹，实际运动仍由 MuJoCo 积分，碰撞仍在每个物理步检查。新专家预算为 200 个控制步，任务 horizon 仍为 200。旧配置缺少控制器字段时保留原 waypoint 行为。
+新配置使用 `planner.expert_controller: spline`：对整条关节路点路径联合求解分段七次最小 snap 样条，约束内部路点的位置、速度、加速度和 jerk 连续，起终点速度、加速度和 jerk 为零。内部路点可带非零速度通过。默认每关节参考速度上限为 0.35 rad/s、加速度上限为 2 rad/s²、jerk 上限为 10 rad/s³；按三种导数约束给每段分配时间，再统一拉长时长满足限值。这些是参考轨迹限值，实际运动仍由 MuJoCo 积分。
+
+整条参考曲线转换为 Bézier 控制点后递归检查关节限位和两根连杆的完整间隙，并用控制点包络与连杆位移上界给出保守安全判定。弯曲路径不安全时逐级缩小内部路点导数，必要时退回路点处零速度、零加速度、零 jerk 的 C³ 路径；无法通过检查则拒收。实际执行仍逐物理步检查碰撞。NPZ 的 `expert_spline_blend` 记录导数缩放系数，0 表示使用停稳通过的安全回退；`expert_spline_duration` 记录参考时长。旧配置仍支持 `quintic`，缺少控制器字段时沿用 waypoint。
+
+参考时长加成功保持时间若超过任务预算，会在执行前拒收，记录为 `spline_too_long`，避免慢速轨迹反复仿真到超时。采样范围和难度配额保持原配置；收录的专家仍必须通过实际执行验收。
+
+默认控制频率为 **50 Hz**：物理步长仍为 0.005 s，每 4 个物理步更新一次动作。动作目标偏移上限降为 ±0.04 rad。`env.control_interpolation: c3_filter` 使用四级连续滤波，在每个物理步精确推进控制目标，并保留跨控制周期的导数状态，构成 C³ 连续的理想控制信号；MuJoCo 以 200 Hz 采样执行。滤波每级时间常数 `control_filter_tau: 0.003` s，总低频延迟约 12 ms，专家与所有学习策略共用这一执行规则。实际运动的高阶导数还受采样、动作限幅和动力学影响。
+
+任务 horizon 与专家上限均为 **500 控制步（10 秒）**；成功保持 13 步约为 0.26 秒。TD horizon 调为 25 步，仍约为 0.5 秒。BC 的学习率 0.001、batch size 256、8000 个参数更新步保持不变。旧运行缺少插值字段时仍使用原 hold 模式；要使用新频率、动作范围和专家，需以新配置在新目录重新生成并训练。
 
 新生成时若专家实际经过另一个 IK 解到达目标，会安全截短原路径并重新执行，再按最终路径和实际间隙计算难度。原有 easy/medium/hard 配额仍执行。需要全新数据时，用新目录直接生成：
 
 ```bash
-recap generate --run runs/seed42-smooth --config configs/default.yaml
-recap train --model bc --run runs/seed42-smooth --config runs/seed42-smooth/config.json
-recap evaluate --model bc --run runs/seed42-smooth --config runs/seed42-smooth/config.json
+recap generate --run runs/seed42-c3 --config configs/default.yaml
+recap train --model bc --run runs/seed42-c3 --config runs/seed42-c3/config.json
+recap evaluate --model bc --run runs/seed42-c3 --config runs/seed42-c3/config.json
 ```
 
 BC 新增 `train.goal_anchor_samples: 16`：仅在 train 场景的安全 IK 解附近，以每关节 ±0.12 rad 扰动补充局部纠偏标签，同时加入精确目标处的零动作标签。所有样本都通过关节限位和直连避障检查；它们只参与 BC 动作监督，不伪造 episode、回报或 Value 标签。设为 0 可关闭。验证/测试不添加控制器，仍直接使用策略输出。`bc.goal_anchors.json` 记录补充样本数量。
 
-成功条件仍为末端距离小于 0.03 m 并连续保持 5 步，成功结束不要求末端精确重合目标中心。新轨迹保存逐帧 `distance` 和 `goal_hold_steps`；评测增加最终距离和 `near_goal_stall_count`。停滞指超时、最终距离在成功阈值外两倍阈值内，且最后 20 帧相邻关节位移均小于 1e-5 rad。
+默认成功距离从 0.03 m 放宽到 **0.035 m**，连续保持 13 步，成功结束不要求末端精确重合目标中心。评测另外报告 `strict_success_rate`（已记录轨迹中按 3 cm 连续保持同样步数的成功率）和 `tolerance_only_success_count`（仅因放宽范围而通过的数量）；前者不等于在旧判定下重新执行一次策略。`near_goal_stall_count` 独立统计范围外的静止超时：最终距离在成功阈值外两倍阈值内，且最后 20 帧相邻关节位移均小于 1e-5 rad。
+
+新轨迹保存逐帧 `distance`、`goal_hold_steps`，以及物理子步 `control_commands`、`substep_qpos`、`executed_substeps`。`applied_command` 保留限幅后的目标命令，实际送入 MuJoCo 的目标在 `control_commands` 中；碰撞提前终止时只读取每帧前 `executed_substeps` 个子步，余下槽位为末值填充。`control_dt` 和 `physics_timestep` 记录物理时间单位，评测的 `completion_seconds` 可用于不同控制频率之间的时间比较。模型观测仍为 9D。
 
 若需保留既有场景，可运行 `python scripts/rebuild_experts.py --run runs/seed42-8k --output runs/seed42-smooth-replay --config configs/default.yaml`。该工具在新目录重新执行专家，冻结场景几何和原难度分组，另存 `expert_replay_metrics` 与 `expert_replay.json`，不把重放后的指标冒充原始采样难度。迁移数据的 `recap migrate` 不会重新执行或平滑已有动作。
 
-固定场景对照中，530 条平滑专家均执行成功，峰值 jerk 的中位数降低约 77%；但平滑数据加近目标监督的 8000 步 BC 对照 ID 为 64%，未超过旧版的 66%。仅在旧专家上增加近目标监督时为 72%。平滑度提升不等于闭环成功率提升，详见 [检查记录](docs/experiments/expert_smooth_goal_stall_seed42.md)。
+此前的 20 Hz、3 cm、分段 quintic 历史对照中，530 条平滑专家均执行成功，峰值 jerk 的中位数降低约 77%；平滑数据加近目标监督的 8000 步 BC 对照 ID 为 64%，仅在旧专家上增加近目标监督时为 72%。这些数据不属于当前 50 Hz、C³、3.5 cm 配置，详见 [历史检查记录](docs/experiments/expert_smooth_goal_stall_seed42.md)。
+
+当前实现已通过 149 项测试、含 hard 配额的从零生成完整 smoke，以及 step/epoch 两种训练模式检查。在同一批 24 个固定场景、相同 200 Hz 物理采样和 3.5 cm 成功标准下，旧 20 Hz quintic 为 24/24 成功，新 50 Hz 慢速 C³ 为 20/24；4 个失败均为 10 秒预算内未完成。在两组都成功的 20 个场景中，每条轨迹峰值物理 jerk 的中位数为 10245→463 rad/s³，子步控制目标跳变为 0.03139→0.00287 rad，中位执行时间为 4.225→6.69 秒。该对照同时改变速度、动作上限、样条和控制频率，不能将效果单独归因于某一项，也不代表 BC 策略成功率。详情见 [验证数据](docs/experiments/c3_50hz_verification.json) 和 [对照图](docs/experiments/c3_50hz_comparison.png)。
 
 ## 模块与数据
 
-- `recap/env.py`：2×0.5m 胶囊连杆，位置执行器，20Hz 控制，逐物理步全连杆解析碰撞检测。胶囊端帽覆盖关节及末端；不包含机器人自碰撞任务。
+- `recap/env.py`：2×0.5m 胶囊连杆，位置执行器，默认 50Hz 控制、200Hz 物理步，逐物理步全连杆解析碰撞检测。胶囊端帽覆盖关节及末端；不包含机器人自碰撞任务。
 - `recap/planning.py`：两分支 IK、有限关节网格 A*、插值验证、捷径平滑、实际控制器专家执行与场景验收。
 - `recap/models.py`：6×128 SiLU MLP、201-bin 插值标签、标量 Value 消融、有界 Gaussian NLL。
-- `recap/controllers.py`：兼容旧路点控制及五次时间标定的平滑专家跟踪。
+- `recap/controllers.py`、`recap/splines.py`：全局 C³ 样条、整曲线安全检查，兼容旧路点及 quintic 专家。
+- `recap/control_filter.py`：专家和学习策略共用的 C³ 子步控制滤波。
 - `recap/goal_supervision.py`：只用于 BC 训练的安全近目标纠偏样本。
 - `recap/cli.py`：数据、训练、断点恢复、固定场景配对评测和静态绘图。
 
 每条 NPZ 独立保存 episode，禁止跨 episode 拼接 TD 窗口；场景参数保存在 `scenes.json`，通过 scene_id 关联。`data/<split>/expert` 中的测试专家只用于可解性证明。train 和 validation 的自主数据仅在各自场景中采集。所有评测策略共享同一测试列表，报告保存逐场景结果、Wilson 成功率区间和 RECAP 相对 BC 增益。
 
-观测明确为 **9D**：两关节的 sin（2D）、cos（2D）、目标坐标（2D）、障碍物中心（2D）及半径（1D）。条件策略使用三态 one-hot（低/高/null），因此网络输入 12D。目标与障碍物在同一世界坐标系，位置和半径使用米；动作单位 rad，默认 ±0.05。
+观测明确为 **9D**：两关节的 sin（2D）、cos（2D）、目标坐标（2D）、障碍物中心（2D）及半径（1D）。条件策略使用三态 one-hot（低/高/null），因此网络输入 12D。目标与障碍物在同一世界坐标系，位置和半径使用米；动作单位 rad，默认 ±0.04。
 
-200 步任务最差回报为 -349，因此统一使用 horizon+149 归一化，避免原文针对 100 步的 249 尺度造成越界。成功终止奖励 0，其余普通步 -1，碰撞、约束和超时终止 -150。gamma=1，所有终止（含超时）取消 bootstrap。默认 TD horizon=10。quantile 筛选只表示排名，不能称为正优势。
+默认 500 步任务最差回报为 -649，统一使用 horizon+149 归一化；旧 200 步运行仍自动使用 349。成功终止奖励 0，其余普通步 -1，碰撞、约束和超时终止 -150；提高控制频率后每物理秒包含更多普通步，回报不应与旧运行直接比较。gamma=1，所有终止（含超时）取消 bootstrap。默认 TD horizon=25。quantile 筛选只表示排名，不能称为正优势。
 
 RECAP 使用 null NLL + alpha×高优势 NLL，另以 0.1 权重学习低条件，条件 dropout 可配置。Gaussian 标签在边界做 1e-6 数值裁剪，以避免 atanh 无穷；评测使用 tanh(mean)。BC/SFT 使用以动作范围归一化的 MSE。SFT 从 BC checkpoint 初始化，保留专家并加入成功 rollout；RECAP 从随机 Gaussian 网络训练。Value 使用专家和混合 rollout，validation 按场景独立；模型保存最佳验证 checkpoint 和最近训练状态。
 
@@ -122,7 +135,7 @@ RECAP 使用 null NLL + alpha×高优势 NLL，另以 0.1 权重学习低条件�
 
 当前开发环境已使用真实 PyTorch 与 MuJoCo 3.3.7 执行完整测试，以及现有专家数据上的 BC 对照训练与闭环评测。本地依赖装在临时隔离目录中。单次、单种子的结果不能视为稳定成功率保证；服务器仍应执行 `pytest -q` 和 smoke 检查。
 
-生成器按几何与执行指标分类 easy/medium/hard，并按配置的配额验收。新专家有五次时间标定；旧配置仍可使用逐路点限幅跟踪。规划插值为有限分辨率验证，不是数学意义的连续碰撞证明。当前图表包括 loss 和单轨迹 Value/Return/Advantage、机械臂路径；BC 历史保存定期验证成功率，sweep 脚本可绘制曲线。尚未实现难度匹配子集、跨种子聚合、优势 oracle/标签准确率、排序相关性报告、多轮 RECAP、在线专家纠偏和仿真状态分支接口。BC 的近目标几何监督不等于在线专家纠偏。没有为达到预期成功率放宽成功条件或筛选测试结果。
+生成器按几何与执行指标分类 easy/medium/hard，并按配置的配额验收。新专家为全局 C³ 样条；旧配置保留 quintic 和逐路点跟踪。初始直线规划仍使用有限分辨率检查，最终样条使用保守的整曲线间隙检查，实际动力学跟踪继续依赖逐物理步执行验收。当前图表包括 loss 和单轨迹 Value/Return/Advantage、机械臂路径；BC 历史保存定期验证成功率，sweep 脚本可绘制曲线。尚未实现难度匹配子集、跨种子聚合、优势 oracle/标签准确率、排序相关性报告、多轮 RECAP、在线专家纠偏和仿真状态分支接口。BC 的近目标几何监督不等于在线专家纠偏。按用户要求将成功范围从 3 cm 调到 3.5 cm，并独立报告轨迹内 3 cm 指标；新旧环境结果不能直接视作模型提升。
 
 目标和障碍物中心采用覆盖四个象限的环带采样。角度在 [-π, π) 内均匀采样，半径为 sqrt(U(r_min², r_max²))，使候选点按面积均匀分布。默认障碍物中心距原点 0.20～0.80 m，各集合共用该分布。目标距离和障碍物中心距离可在 YAML 的 `sampling` 中调整。
 

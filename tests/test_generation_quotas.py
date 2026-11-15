@@ -1,5 +1,6 @@
 from collections import Counter
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -95,6 +96,40 @@ def test_second_ik_branch_can_fill_a_missing_quota(controlled_generator, monkeyp
     monkeypatch.setattr(planning, 'safe_edge', lambda start, goal, scene, config: goal[0] == 1)
     pairs = planning.ScenarioGenerator(cfg).generate('train', 2, 42)
     assert Counter(scene['metrics']['difficulty'] for scene, episode in pairs) == dict(easy=1, medium=1)
+
+
+def test_over_budget_spline_is_rejected_before_physics(controlled_generator, monkeypatch):
+    cfg, sequence, _ = controlled_generator
+    cfg['difficulty_ratio'] = dict(easy=1., medium=0., hard=0.)
+    cfg['planner']['max_attempts'] = 1
+    sequence[:] = ['easy']
+    monkeypatch.setattr(planning, 'make_expert', lambda *args: SimpleNamespace(kind='spline', trajectory=SimpleNamespace(duration=1000.)))
+    def unexpected_rollout(*args, **kwargs):
+        raise AssertionError('Over-budget reference must not run physics')
+    monkeypatch.setattr(planning, 'rollout', unexpected_rollout)
+    generator = planning.ScenarioGenerator(cfg)
+    with pytest.raises(RuntimeError, match='spline_too_long'):
+        generator.generate('train', 1, 42)
+    assert generator.rejections['spline_too_long'] == 1
+
+
+def test_retargeted_spline_budget_is_checked_again(controlled_generator, monkeypatch):
+    cfg, sequence, _ = controlled_generator
+    cfg['difficulty_ratio'] = dict(easy=1., medium=0., hard=0.)
+    cfg['planner']['max_attempts'] = 1
+    sequence[:] = ['easy']
+    durations = iter([.1, 1000.])
+    monkeypatch.setattr(planning, 'make_expert', lambda *args: SimpleNamespace(kind='spline', trajectory=SimpleNamespace(duration=next(durations))))
+    monkeypatch.setattr(planning, 'completed_goal_path', lambda *args: np.array([[0., 0.], [.5, .1], [1., 0.]]))
+    previous = planning.rollout
+    calls = []
+    def rollout(*args, **kwargs):
+        calls.append(1)
+        return previous(*args, **kwargs)
+    monkeypatch.setattr(planning, 'rollout', rollout)
+    with pytest.raises(RuntimeError, match='spline_too_long'):
+        planning.ScenarioGenerator(cfg).generate('train', 1, 42)
+    assert len(calls) == 1
 
 
 def test_config_without_ratios_preserves_unrestricted_sampling(controlled_generator):

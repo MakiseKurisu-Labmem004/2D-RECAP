@@ -23,10 +23,15 @@ def motion_metrics(episode, scene, cfg):
     jerk = np.diff(acceleration, axis=0) / dt
     def peak(values):
         return float(np.max(np.linalg.norm(values, axis=1))) if len(values) else 0.
-    return dict(steps=len(episode['action']), peak_joint_speed=peak(velocity),
+    result = dict(steps=len(episode['action']), peak_joint_speed=peak(velocity),
                 peak_joint_acceleration=peak(acceleration), peak_joint_jerk=peak(jerk),
                 peak_action_jump=peak(np.diff(episode['action'], axis=0)),
                 min_clearance=float(episode['clearance'].min()))
+    if 'substep_qpos' in episode:
+        physics = np.vstack((scene['q0'], np.concatenate([q[:int(n)] for q, n in
+                             zip(episode['substep_qpos'], episode['executed_substeps'])])))
+        result['peak_physics_joint_jerk'] = peak(np.diff(physics, n=3, axis=0) / cfg['env']['timestep']**3)
+    return result
 
 
 def rebuild_experts(source, destination, settings):
@@ -61,7 +66,7 @@ def rebuild_experts(source, destination, settings):
                 scene = lookup[scene_id]
                 route = recover_expert_path(previous, scene, original)
                 route = completed_goal_path(route, previous, scene, cfg)
-                expert = make_expert(route, cfg)
+                expert = make_expert(route, cfg, scene)
                 current = rollout(env, scene, expert, int(previous['seed']), 'expert', limit=cfg['planner']['expert_limit'])
                 if not current['success'][-1]:
                     raise RuntimeError(f'{scene_id}: smooth expert failed ({current["failure_reason"][-1]}); original data unchanged')

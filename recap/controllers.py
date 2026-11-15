@@ -1,6 +1,7 @@
 """Expert tracking of collision-checked joint paths."""
 
 import numpy as np
+from .splines import JointSpline
 
 
 def quintic_reference(start, goal, duration, time):
@@ -62,9 +63,36 @@ class QuinticExpert:
         return np.clip(command - env.data.qpos, -self.limit, self.limit)
 
 
-def make_expert(path, cfg):
+class SplineExpert:
+    kind = 'spline'
+
+    def __init__(self, path, cfg, scene):
+        self.trajectory = JointSpline(path, cfg, scene)
+        self.dt = cfg['env']['timestep'] * cfg['env']['substeps']
+        self.limit = cfg['env']['action_limit']
+        self.feedforward = cfg['env']['damping'] / cfg['env']['kp']
+        self.time = 0.
+
+    def __call__(self, obs, env):
+        self.time = min(self.trajectory.duration, self.time+self.dt)
+        target = self.trajectory.reference(self.time)
+        velocity = self.trajectory.reference(self.time, 1)
+        return np.clip(target+self.feedforward*velocity-env.data.qpos, -self.limit, self.limit)
+
+
+def make_expert(path, cfg, scene=None):
     kind = cfg['planner'].get('expert_controller', 'waypoint')
+    if kind == 'spline':
+        if scene is None: raise ValueError('Spline expert requires scene geometry')
+        return SplineExpert(path, cfg, scene)
     controllers = dict(waypoint=WaypointExpert, quintic=QuinticExpert)
     if kind not in controllers:
-        raise ValueError('expert_controller must be waypoint or quintic')
+        raise ValueError('expert_controller must be waypoint, quintic, or spline')
     return controllers[kind](path, cfg)
+
+
+def expert_fits_budget(expert, cfg):
+    if expert.kind != 'spline': return True
+    dt = cfg['env']['timestep'] * cfg['env']['substeps']
+    budget = min(cfg['env']['horizon'], cfg['planner']['expert_limit']) * dt
+    return expert.trajectory.duration + cfg['env']['hold']*dt <= budget

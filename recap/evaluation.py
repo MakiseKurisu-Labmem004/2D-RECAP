@@ -26,6 +26,20 @@ def episode_metrics(episodes):
     if all('distance' in ep for ep in episodes):
         result['mean_final_distance'] = float(np.mean([ep['distance'][-1] for ep in episodes]))
         result['mean_min_distance'] = float(np.mean([np.min(ep['distance']) for ep in episodes]))
+    if all('control_dt' in ep for ep in episodes):
+        times = [len(ep['reward'])*float(ep['control_dt']) for ep in episodes if ep['success'][-1]]
+        result['completion_seconds'] = float(np.mean(times)) if times else None
+    if all(all(key in ep for key in ('distance','strict_success_distance','goal_hold_required')) for ep in episodes):
+        strict = []
+        for ep in episodes:
+            held, achieved = 0, False
+            for distance in ep['distance']:
+                held = held+1 if distance < float(ep['strict_success_distance']) else 0
+                achieved = achieved or held >= int(ep['goal_hold_required'])
+            strict.append(bool(ep['success'][-1]) and achieved)
+        result['strict_success_count'] = sum(strict)
+        result['strict_success_rate'] = float(np.mean(strict))
+        result['tolerance_only_success_count'] = sum(successes)-sum(strict)
     if all(all(key in ep for key in ('distance', 'qpos', 'success_distance')) for ep in episodes):
         stalls = [bool(ep['truncated'][-1]) and len(ep['qpos']) >= 20
                   and float(ep['success_distance']) < ep['distance'][-1] <= 2*float(ep['success_distance'])

@@ -135,6 +135,7 @@ def test_failed_json_write_preserves_old_file_and_removes_temporary(tmp_path, mo
 @pytest.mark.parametrize('legacy', [False, True])
 def test_recover_old_episode_verifies_expert_actions(legacy):
     cfg = yaml.safe_load(open('configs/default.yaml'))
+    cfg['env']['action_limit'] = .05  # Configuration saved with the legacy trajectory.
     start = np.array([0., 1.])
     target = np.array([.2, 1.])
     qpos = np.array([[value, 1.] for value in (.04, .08, .12, .16, .2)])

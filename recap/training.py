@@ -114,6 +114,9 @@ def train_steps(root, kind, cfg, model, optimizer, train, validation, loss, scen
                                   validation_collision_rate=metrics['collision_rate'],
                                   validation_timeout_rate=metrics['timeout_rate'],
                                   validation_by_difficulty=difficulty_metrics(results, scenes))
+                    if 'strict_success_rate' in metrics:
+                        record.update(validation_strict_success_rate=metrics['strict_success_rate'],
+                                      validation_tolerance_only_success_count=metrics['tolerance_only_success_count'])
                     improved = success > best_success or (success == best_success and error < best)
                     if improved: best_success = success
                 if improved: best = error
