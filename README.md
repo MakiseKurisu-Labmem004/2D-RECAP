@@ -194,6 +194,57 @@ python scripts/search_bc.py --run runs/seed42-smooth --output runs/experiments/b
 # 单 GPU：使用 --workers 1 --device cuda；不同时启动多个训练进程占用同一 GPU
 ```
 
+## 目标任务持续改进：两组接管对照
+
+`recap improve` 将避障到达视为一个任务，默认把 train、ID 和各 OOD 的已有场景合成一个统一实践池，集合名仅保留为来源元数据；validation 保留作训练监控。默认不额外划分目标 holdout。在一个运行目录内支持多轮实践，两组都持续使用原 `data/train/expert` 和已有 `data/train/rollout`。原 validation 数据只用于验证。组间区别是新增数据是否包含少量专家接管：
+
+| 模式 | 每轮训练数据 |
+|---|---|
+| `autonomous` | 原训练集 + 累积自主 Rollout |
+| `corrections` | 原训练集 + 累积自主 Rollout + 累积局部专家接管片段 |
+| `both` | 从同一个 BC checkpoint 分别运行上述两组 |
+
+```bash
+# 对 ID 目标任务做两组实验，原数据和初始 BC 保留在原处
+recap improve --run runs/seed42 --mode both --experiment pooled-v1 --rounds 3 --episodes 200 --steps 1000 --lr 0.0001 --expert-episodes 10
+# 单独运行一组，使用不同实验名称
+recap improve --run runs/seed42 --mode autonomous --experiment autonomous-v1
+recap improve --run runs/seed42 --mode corrections --experiment corrections-v1
+```
+
+`--steps 1000` 表示每轮 Value 和 RECAP 分别执行 1000 次优化器更新。每组从同一个 BC 初始化；RECAP 的均值分支复制 BC 权重，新增条件输入初始为零，避免随机重建一个已经表现不错的策略。后续轮次从已接受的策略继续微调，Value 也随其更新。每轮的原训练数据与累积新经验共同参与优化，保留成功经验以减少遗忘。自主采样在统一实践池中均匀、有放回随机抽取，每个场景概率相同，与历史成功或失败无关。同一轮两组使用相同 seed 和场景抽样序列。专家接管组仍只从本轮实际采到的失败轨迹中提供有限纠正。
+
+接管组先完成与自主组相同预算的均匀随机采集，再从实际失败记录中选择至多 `--expert-episodes 10` 次接管。默认回放到 `max(0,失败轨迹长度-25)`，重放真实动作恢复当时的物理和滤波状态。随后由规划专家持续控制直到满足成功距离和保持步数要求，不再交还策略，也不设单次或每轮专家执行步数上限。`--lookback` 可调整接管起点。若无法规划、发生碰撞/约束失败，或专家参考结束后仍在目标外静止，则记录接管失败；不会把失败数据当作成功纠正。
+
+这是对已知失败进行事后接管的仿真近似，不是部署时预知失败的控制器；只使用当前状态、目标和几何规划，不读取目标场景原有的专家轨迹。从接管起到成功结束的全部帧均由专家执行，`intervention_mask` 全为真，全部强制标为高优势，默认纠正帧权重为 `--correction-weight 5`。原训练集和 validation 的 `expert/` 中所有示范帧也强制标高；此前的自主轨迹仍按估计 Advantage 标记。
+
+自主执行和正式评测仍遵守原任务 horizon。专家示教可延长到成功，数据记录 `task_success` 和 `expert_completion_step`：超过原时限才恢复成功，不计为按时完成任务。完整接管轨迹用于 RECAP 策略纠偏；Value 只使用原时限内的前缀，若超时则在原截止处赋予超时终止与失败奖励，避免改变原任务的价值定义。每轮分别报告实际专家动作数、专家恢复次数、时限内辅助成功次数和重放步数。原训练数据继续参与两组训练。
+
+默认 `--splits all --holdout-fraction 0`：合并所有非 validation 的现有场景，一起采集 Rollout、混合原训练集进行训练，不重新生成几何场景。默认数据规模下为 train 200 + 六类各 50，共 500 个实践场景；30 个 validation 场景仅作监控。`--episodes 200` 表示从统一池均匀有放回采样 200 次，不保证每个场景每轮都采到；回归检查覆盖整个实践池。原 ID/OOD 标签仅记录数据来源，池内不按这些标签分别训练。结果表示已练习场景上的改进。若另需独立泛化检查，可显式设置 `--holdout-fraction 0.2`；`--splits id` 或 `--scene-ids id-2000042-22` 仍可用于限定调试范围。原 `scenes.json` 和专家文件不修改；共同监督数据仍按两组约定使用原训练集，其他来源只提供实践场景，并不整批加入其专家答案。
+
+每轮对无专家辅助的候选策略检查目标适应场景，以及原 validation 场景。默认 `--max-regressions 0`：原本成功的场景不能变失败，总成功数不能降低，且至少修复一个目标失败或改善原 validation 成功数，才替换当前策略；否则保留上一策略。显式启用 holdout 时，仅在开始和最后报告，不参与接受判断；默认其为空。这个门槛检查的是有限场景上的确定性回归，不保证未来永不失败。
+
+结果保存在原目录的独立子树，原 BC 权重、专家数据和普通训练产物不覆盖：
+
+```text
+runs/seed42/improvement/pooled-v1/
+├── protocol.json             # 公共初始权重哈希、训练来源、统一实践池与可选留出场景
+├── baseline.json
+├── initial.bc.pt            # 固定初始模型快照，两组共用
+├── comparison.json           # 两组最终策略、无辅助成功率、回归与专家预算
+├── autonomous/
+│   ├── summary.json
+│   └── round-001/            # Value/RECAP、training.*、本轮数据和 result.json
+└── corrections/
+    ├── summary.json
+    └── round-001/
+        └── data/adaptation/
+            ├── rollout/      # 纯自主轨迹
+            └── corrections/  # 接管起至专家成功的完整片段，intervention_mask 全为真
+```
+
+各组 `summary.json` 的 `active_policy` 与 `active_policy_kind` 指向最后通过回归门槛的策略，可能仍是固定保存的初始 BC 快照。候选策略为本轮完整训练预算后的 `recap.last.pt`；Value 按验证 loss 选模。实验名称已存在时会拒绝覆盖，另取 `--experiment` 名称可重新对照。`--train-config` 可覆盖其他训练字段，但网络须与初始 BC 一致，步数、学习率和纠正权重以 improve 的命令行参数为准。这些默认值是实验预算，尚未构成长训练成功率保证。
+
 ## 模块与数据
 
 - `recap/env.py`：2×0.5m 胶囊连杆，位置执行器，默认 50Hz 控制、200Hz 物理步，逐物理步全连杆解析碰撞检测。胶囊端帽覆盖关节及末端；不包含机器人自碰撞任务。
@@ -210,7 +261,7 @@ python scripts/search_bc.py --run runs/seed42-smooth --output runs/experiments/b
 
 默认 500 步任务最差回报为 -649，统一使用 horizon+149 归一化；旧 200 步运行仍自动使用 349。成功终止奖励 0，其余普通步 -1，碰撞、约束和超时终止 -150；提高控制频率后每物理秒包含更多普通步，回报不应与旧运行直接比较。gamma=1，所有终止（含超时）取消 bootstrap。默认 TD horizon=25。quantile 筛选只表示排名，不能称为正优势。
 
-RECAP 使用 null NLL + alpha×高优势 NLL，另以 0.1 权重学习低条件，条件 dropout 可配置。Gaussian 标签在边界做 1e-6 数值裁剪，以避免 atanh 无穷；评测使用 tanh(mean)。BC/SFT 使用以动作范围归一化的 MSE。SFT 从 BC checkpoint 初始化，保留专家并加入成功 rollout；RECAP 从随机 Gaussian 网络训练。Value 使用专家和混合 rollout，validation 按场景独立；模型保存最佳验证 checkpoint 和最近训练状态。
+RECAP 中原始专家示范帧与专家实际接管帧强制使用高优势条件，自主帧按估计 Advantage 和阈值标记；Value 的回报监督与数值 Advantage 保持原定义。`diagnostics.json` 的 `selected_fraction` 表示最终标签中高优势帧占比，`estimated_selected_fraction` 保留按数值 Advantage 阈值筛选的占比。RECAP 使用 null NLL + alpha×高优势 NLL，另以 0.1 权重学习低条件，条件 dropout 可配置。Gaussian 标签在边界做 1e-6 数值裁剪，以避免 atanh 无穷；评测使用 tanh(mean)。BC/SFT 使用以动作范围归一化的 MSE。SFT 从 BC checkpoint 初始化，保留专家并加入成功 rollout；RECAP 从随机 Gaussian 网络训练。Value 使用专家和混合 rollout，validation 按场景独立；模型保存最佳验证 checkpoint 和最近训练状态。
 
 ## 验证状态与限制
 

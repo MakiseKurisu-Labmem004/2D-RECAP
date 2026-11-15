@@ -5,6 +5,26 @@ from torch.nn import functional as F
 from .observations import OBSERVATION_DIM
 
 
+def warm_start_policy(target, source):
+    """Preserve a BC/SFT mean policy when adding advantage conditioning."""
+    if target.kind!='recap' or source.kind not in ('bc','sft','recap'):
+        raise ValueError('Warm start requires a RECAP target and a policy source')
+    if target.limit!=source.limit or len(target.net)!=len(source.net):
+        raise ValueError('Warm start requires matching policy architecture/action bounds')
+    if source.kind=='recap':
+        target.load_state_dict(source.state_dict()); return
+    with torch.no_grad():
+        for index,(dst,src) in enumerate(zip(target.net,source.net)):
+            if not isinstance(dst,nn.Linear): continue
+            if index==0:
+                dst.weight.zero_(); dst.weight[:,:OBSERVATION_DIM].copy_(src.weight); dst.bias.copy_(src.bias)
+            elif index==len(target.net)-1:
+                dst.weight.zero_(); dst.bias.fill_(-2.3)
+                dst.weight[:2].copy_(src.weight); dst.bias[:2].copy_(src.bias)
+            else:
+                dst.weight.copy_(src.weight); dst.bias.copy_(src.bias)
+
+
 def returns(rewards,scale):
     return np.cumsum(np.asarray(rewards,dtype=np.float64)[::-1])[::-1].copy()/scale
 

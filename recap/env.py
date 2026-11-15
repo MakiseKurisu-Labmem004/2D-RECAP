@@ -59,7 +59,7 @@ class ObstacleReach2D(gym.Env):
         self.done = False
         return self.obs(), {}
 
-    def step(self, action):
+    def step(self, action, *, allow_timeout=True):
         if self.done:
             raise RuntimeError('reset required after episode end')
         action = np.asarray(action)
@@ -93,7 +93,7 @@ class ObstacleReach2D(gym.Env):
         self.held = self.held+1 if distance < c['success_distance'] else 0
         success = self.held >= c['hold'] and not reason
         terminated = bool(success or reason)
-        truncated = self.steps >= c['horizon'] and not terminated
+        truncated = allow_timeout and self.steps >= c['horizon'] and not terminated
         if truncated:
             reason = 'timeout'
         self.done = terminated or truncated

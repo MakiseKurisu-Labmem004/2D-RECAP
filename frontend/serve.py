@@ -70,8 +70,12 @@ def build_index(run):
     for path in sorted(run.glob('evaluation*.json')):
         evaluations.update(json.loads(path.read_text(encoding='utf-8')))
     migration_path = run / 'migration.json'
+    spec_path = run / 'data.spec.json'
     return dict(run=run.name, config=config,
                 histories=histories, evaluations=evaluations,
+                data_spec=json.loads(spec_path.read_text(encoding='utf-8')) if spec_path.exists() else {},
+                training_configs={p.name.removeprefix('training.').removesuffix('.json'): json.loads(p.read_text(encoding='utf-8')) for p in sorted(run.glob('training.*.json'))},
+                goal_anchors={p.name.removesuffix('.goal_anchors.json'): json.loads(p.read_text(encoding='utf-8')) for p in sorted(run.glob('*.goal_anchors.json'))},
                 migration=json.loads(migration_path.read_text(encoding='utf-8')) if migration_path.exists() else {},
                 checkpoints=[p.name for p in sorted((run / 'checkpoints').glob('*.pt'))],
                 generation=json.loads(generation_path.read_text(encoding='utf-8')) if generation_path.exists() else {},
@@ -93,6 +97,9 @@ class RunStore:
             files.extend(sorted(self.run.glob('evaluation*.json')))
             files.extend(sorted((self.run / 'checkpoints').glob('*.pt')))
             files.append(self.run / 'migration.json')
+            files.append(self.run / 'data.spec.json')
+            files.extend(sorted(self.run.glob('training.*.json')))
+            files.extend(sorted(self.run.glob('*.goal_anchors.json')))
             signature = tuple((str(p), p.stat().st_mtime_ns, p.stat().st_size) for p in files if p.exists())
             if signature != self.signature:
                 index = build_index(self.run)
@@ -124,7 +131,9 @@ class Handler(SimpleHTTPRequestHandler):
                 if relative not in {e['path'] for e in self.store.get()['episodes']}:
                     return self.send_error(404)
                 return self.send_json(episode(self.run / 'data' / relative,
-                    ['qpos', 'action', 'reward', 'clearance', 'success', 'failure_reason', 'scene_id', 'episode_id']))
+                    ['qpos', 'action', 'reward', 'clearance', 'success', 'failure_reason', 'scene_id', 'episode_id',
+                     'distance', 'goal_hold_steps', 'success_distance', 'strict_success_distance',
+                     'goal_hold_required', 'control_dt', 'physics_timestep', 'executed_substeps']))
             if url.path not in ('/', '/index.html', '/app.js', '/research.js', '/style.css', '/favicon.svg'):
                 return self.send_error(404)
             return super().do_GET()
@@ -137,7 +146,7 @@ class Handler(SimpleHTTPRequestHandler):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--run', type=Path, default=Path(__file__).resolve().parent.parent / 'runs' / 'seed42-8k')
+    parser.add_argument('--run', type=Path, default=Path(__file__).resolve().parent.parent / 'runs' / 'seed42')
     parser.add_argument('--port', type=int, default=8042)
     args = parser.parse_args()
     run = args.run.resolve()

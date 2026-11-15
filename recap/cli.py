@@ -9,7 +9,7 @@ import yaml
 from tqdm import tqdm
 from .env import ObstacleReach2D
 from .planning import rollout
-from .models import Model,returns,advantage,distribution_targets
+from .models import Model,returns,advantage,distribution_targets,warm_start_policy
 from .datasets import DATASET_SPLITS
 from .generation import generate_datasets,write_json
 from .evaluation import episode_metrics,difficulty_metrics
@@ -101,8 +101,9 @@ def annotate(eps,model,cfg):
     return eps
 
 
-def fit(root,kind,cfg,resume=False):
+def fit(root,kind,cfg,resume=False,*,expert_root=None,extra_train=(),extra_validation=(),initial_policy=None,initial_value=None,persist_annotations=True):
     cfg=copy.deepcopy(cfg)
+    extra_train=list(extra_train); extra_validation=list(extra_validation)
     if (root/'config.json').is_file():
         check_environment(json.loads((root/'config.json').read_text()),cfg)
     check_data_spec(root,cfg)
@@ -128,15 +129,20 @@ def fit(root,kind,cfg,resume=False):
     tc['validation_rollout_interval']=validation_interval
     if checkpoint:
         check_resume(cfg,checkpoint.get('config',cfg),checkpoint.get('global_step',0))
-    train=episodes(root,'train'); val=episodes(root,'validation')
+    train=episodes(expert_root or root,'train'); val=episodes(expert_root or root,'validation')
+    # Directory provenance also covers legacy expert NPZs without action_source.
+    expert_episode_ids={id(ep) for ep in train+val}
     if kind!='bc':
-        train+=episodes(root,'train','rollout'); val+=episodes(root,'validation','rollout')
+        train+=episodes(expert_root or root,'train','rollout'); val+=episodes(expert_root or root,'validation','rollout')
+    train+=extra_train; val+=extra_validation
     if kind=='sft':
         train=[ep for ep in train if ep['success'][-1]]
         val=[ep for ep in val if ep['success'][-1]]
     if not train or not val: raise RuntimeError('Generate training and validation episodes first')
     for ep in train+val:
         action=np.asarray(ep['action'])
+        if 'intervention_mask' in ep and np.asarray(ep['intervention_mask']).shape!=(len(action),):
+            raise ValueError('intervention_mask must identify individual trajectory frames')
         if action.ndim!=2 or action.shape[1]!=2 or not np.isfinite(action).all() or np.any(np.abs(action)>cfg['env']['action_limit']+1e-6):
             raise ValueError('Trajectory action definition differs from this environment: expected two bounded joint offsets')
         for key,expected in (('control_dt',cfg['env']['timestep']*cfg['env']['substeps']),
@@ -154,15 +160,28 @@ def fit(root,kind,cfg,resume=False):
             with tqdm(eps,desc=f'Label {split}',unit='episode',leave=False,dynamic_ncols=True) as progress:
                 for ep in progress:
                     ep['advantage_indicator']=ep['td_advantage']>threshold
-                    store(root,split,'annotated',ep)
+                    demonstration=id(ep) in expert_episode_ids
+                    ep['expert_demonstration']=np.array(demonstration)
+                    if demonstration:
+                        ep['advantage_indicator']=np.ones(len(ep['action']),dtype=bool)
+                    if 'intervention_mask' in ep:
+                        ep['advantage_indicator']=ep['advantage_indicator']|ep['intervention_mask'].astype(bool)
+                    if persist_annotations: store(root,split,'annotated',ep)
         save_json(root/'diagnostics.json',dict(transitions=len(adv),positive_fraction=float((adv>0).mean()),
-            selected_fraction=float((adv>threshold).mean()),threshold=threshold,
-            successful_rollouts=sum(bool(e['success'][-1]) for e in episodes(root,'train','rollout')),
+            selected_fraction=float(np.concatenate([ep['advantage_indicator'] for ep in train]).mean()),
+            estimated_selected_fraction=float((adv>threshold).mean()),threshold=threshold,
+            expert_demonstration_steps=sum(len(ep['action']) for ep in train if id(ep) in expert_episode_ids),
+            expert_label_rule='original_demonstrations_and_takeover_frames_high',
+            successful_rollouts=sum(bool(e['success'][-1]) for e in
+                (extra_train if expert_root is not None else episodes(root,'train','rollout'))
+                if not np.asarray(e.get('intervention_mask',False)).any()),
+            intervention_steps=sum(int(np.asarray(e.get('intervention_mask',False)).sum()) for e in train),
             note='Increase rollout budget if positive or successful coverage is insufficient; no automatic performance claim.'))
     def tensors(eps):
         x=np.concatenate([e['observation'] for e in eps])
         y=np.concatenate([returns(e['reward'],cfg['env']['horizon']+149) if kind=='value' else e['action'] for e in eps])
-        label=np.concatenate([e['advantage_indicator'] for e in eps]) if kind=='recap' else np.zeros(len(x))
+        label=np.concatenate([np.stack((e['advantage_indicator'],e.get('intervention_mask',np.zeros(len(e['action'])))),axis=1)
+                              for e in eps]) if kind=='recap' else np.zeros(len(x))
         return tuple(torch.tensor(a,dtype=torch.float32,device=dev) for a in (x,y,label))
     x,y,labels=tensors(train); vx,vy,vl=tensors(val)
     anchor_count=tc.get('goal_anchor_samples',0) if kind=='bc' else 0
@@ -177,6 +196,12 @@ def fit(root,kind,cfg,resume=False):
         tqdm.write(f'BC goal anchors: {len(ax)} training-only samples')
     model=Model(kind,tc,cfg['env']['action_limit']).to(dev)
     if source is not None: model.load_state_dict(source.state_dict())
+    if initial_policy is not None:
+        if resume or kind!='recap': raise ValueError('initial_policy is for fresh RECAP fine-tuning')
+        warm_start_policy(model,initial_policy)
+    if initial_value is not None:
+        if resume or kind!='value': raise ValueError('initial_value is for fresh value fine-tuning')
+        model.load_state_dict(initial_value.state_dict())
     optimizer=make_optimizer(model,tc,saved_train if checkpoint else None)
     start=0; best=float('inf'); history=[]
     best_success=-1.
@@ -190,10 +215,14 @@ def fit(root,kind,cfg,resume=False):
         if kind=='value':
             return ((model.value(a)-b)**2).mean() if tc['scalar_value'] else -(distribution_targets(b,tc['bins'])*model(a).log_softmax(-1)).sum(-1).mean()
         if kind!='recap': return ((model(a)-b)/cfg['env']['action_limit']).square().mean()
+        indicator=l[:,0]; intervention=l[:,1]
+        weight=tc.get('intervention_weight',1.)
+        if not np.isfinite(weight) or weight<1: raise ValueError('intervention_weight must be finite and >= 1')
         null=torch.full((len(a),),2,dtype=torch.long,device=dev)
-        condition=l.long()
+        condition=indicator.long()
         if training: condition=torch.where(torch.rand(len(a),device=dev)<tc['dropout'],null,condition)
-        return model.nll(a,b,null).mean()+tc['alpha']*(l*model.nll(a,b,condition)).mean()+tc['low_weight']*((1-l)*model.nll(a,b,condition)).mean()
+        return (model.nll(a,b,null).mean()+tc['alpha']*(indicator*(1+(weight-1)*intervention)*model.nll(a,b,condition)).mean()
+                +tc['low_weight']*((1-indicator)*model.nll(a,b,condition)).mean())
     validation_scenes=[]
     if validation_interval or (step_mode and kind=='bc'):
         manifest=json.loads((root/'scenes.json').read_text())
@@ -306,7 +335,11 @@ def evaluate_policies(root,cfg,models=None,splits=None,checkpoint=None):
 
 
 def main():
-    p=argparse.ArgumentParser(); p.add_argument('command',choices=['generate','train','rollout','evaluate','plot','all','migrate'])
+    import sys
+    if len(sys.argv)>1 and sys.argv[1]=='improve':
+        from .improvement import main as improve
+        improve(sys.argv[2:]); return
+    p=argparse.ArgumentParser(); p.add_argument('command',choices=['generate','train','rollout','evaluate','plot','all','migrate','improve'])
     p.add_argument('--config',help='Training/config overrides. Existing datasets keep their saved environment; '
                    'fresh train uses default train settings, resume and other commands use the saved run settings.')
     p.add_argument('--run',default='runs/default')

@@ -100,14 +100,21 @@ def completed_goal_path(path, episode, scene, cfg):
     return best
 
 
-def rollout(env,scene,policy,seed,version,noise=0.,limit=None):
+def rollout(env,scene,policy,seed,version,noise=0.,limit=None,reset=True,until_done=False):
     import time
     rng=np.random.default_rng(seed)
-    obs,_=env.reset(seed=seed,options={'scene':scene})
+    if reset: obs,_=env.reset(seed=seed,options={'scene':scene})
+    else:
+        if env.done: raise ValueError('Cannot continue a terminated environment')
+        obs=env.obs()
     rows=[]
-    for t in range(limit or env.cfg['horizon']):
+    remaining=env.cfg['horizon']-env.steps
+    if until_done and limit is not None: raise ValueError('until_done does not accept a step limit')
+    from itertools import count
+    indices=count() if until_done else range(min(limit or remaining,remaining))
+    for t in indices:
         action=np.clip(policy(obs,env)+rng.normal(0,noise,2),-env.cfg['action_limit'],env.cfg['action_limit'])
-        nxt,r,term,trunc,info=env.step(action)
+        nxt,r,term,trunc,info=env.step(action,allow_timeout=False) if until_done else env.step(action)
         rows.append(dict(observation=obs,action=action,next_observation=nxt,reward=r,terminated=term,
                          truncated=trunc,success=info['success'],failure_reason=info['failure_reason'],
                          applied_command=info['applied_command'],step_index=t,timestamp=time.time(),
