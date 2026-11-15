@@ -41,6 +41,25 @@ def test_loading_uses_checkpoint_architecture(tmp_path, config):
     torch.testing.assert_close(loaded(x), model(x))
 
 
+def test_specific_checkpoint_loads_selected_weights_and_step(tmp_path, config):
+    folder = tmp_path / 'checkpoints'
+    folder.mkdir()
+    model = Model('bc', config['train'], config['env']['action_limit'])
+    checkpoint = folder / 'bc.step00002000.pt'
+    torch.save(dict(model=model.state_dict(), config=config, global_step=2000, model_kind='bc'), checkpoint)
+    loaded = cli.load_model(tmp_path, 'bc', config, checkpoint=checkpoint)
+    assert loaded.checkpoint_info['step'] == 2000
+    x = torch.randn(3, 9)
+    torch.testing.assert_close(loaded(x), model(x))
+    changed = copy.deepcopy(config)
+    changed['env']['success_distance'] = .05
+    with pytest.raises(ValueError, match='environment differs'):
+        cli.load_model(tmp_path, 'bc', changed, checkpoint=checkpoint)
+    torch.save(dict(model=model.state_dict(), config=config, model_kind='sft'), checkpoint)
+    with pytest.raises(ValueError, match='contains sft'):
+        cli.load_model(tmp_path, 'bc', config, checkpoint=checkpoint)
+
+
 @pytest.mark.parametrize('kind', ['bc', 'sft', 'recap', 'value'])
 def test_old_checkpoint_requires_retraining(tmp_path, config, kind):
     weights = Model(kind, config['train'], .05).state_dict()

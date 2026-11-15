@@ -64,12 +64,12 @@ def evaluation_run(tmp_path, monkeypatch):
         def close(self):
             self.closed = True
 
-    def load(root, name, config):
+    def load(root, name, config, checkpoint=None):
         loads.append(name)
         return name
 
     def rollout(env, scene, policy, seed, version):
-        success = version != 'bc' or scene['scene_id'].endswith('-0')
+        success = version.split('.')[0] != 'bc' or scene['scene_id'].endswith('-0')
         item = episode(scene['scene_id'], success, '' if success else 'timeout')
         item['episode_id'] = np.array(f'{version}-{seed}')
         return item
@@ -139,7 +139,7 @@ def test_environment_closes_if_rollout_fails(evaluation_run, monkeypatch):
     assert envs[-1].closed
 
 
-def test_cli_routes_bc_evaluation(evaluation_run, monkeypatch):
+def test_cli_routes_bc_evaluation(evaluation_run, monkeypatch, capsys):
     root, cfg, loads, envs = evaluation_run
     config = root / 'request.json'
     config.write_text(json.dumps(cfg))
@@ -147,7 +147,9 @@ def test_cli_routes_bc_evaluation(evaluation_run, monkeypatch):
                                    '--config', str(config), '--splits', 'id'])
     cli.main()
     assert loads == ['bc']
+    assert 'bc/id | success 1/2 (50.0%)' in capsys.readouterr().out
     assert set(json.loads((root / 'evaluation.bc.json').read_text())['bc']) == {'id'}
+    assert (root / 'data/id/bc').is_dir()
 
 
 def test_cli_train_default_still_selects_bc(evaluation_run, monkeypatch):
@@ -160,3 +162,57 @@ def test_cli_train_default_still_selects_bc(evaluation_run, monkeypatch):
     monkeypatch.setattr('sys.argv', ['recap', 'train', '--run', str(root), '--config', str(config)])
     cli.main()
     train.assert_called_once_with(root, 'bc', cfg, False)
+
+
+@pytest.mark.parametrize('form', ['bare', 'run_relative', 'absolute'])
+def test_specific_checkpoint_only_prints_and_does_not_require_best(evaluation_run, monkeypatch, capsys, form):
+    root, cfg, loads, envs = evaluation_run
+    (root / 'bc.pt').unlink()
+    folder = root / 'checkpoints'
+    folder.mkdir()
+    checkpoint = folder / 'bc.step00002000.pt'
+    checkpoint.touch()
+    (root / 'config.json').write_text(json.dumps(cfg))
+    (root / 'evaluation.bc.json').write_text('{"previous": true}')
+    old = root / 'data/id/bc/previous.npz'
+    old.parent.mkdir(parents=True)
+    old.write_bytes(b'previous trajectory')
+    before = {p: p.read_bytes() for p in root.rglob('*') if p.is_file()}
+    argument = checkpoint.name if form == 'bare' else f'checkpoints/{checkpoint.name}' if form == 'run_relative' else str(checkpoint)
+    monkeypatch.setattr('sys.argv', ['recap', 'evaluate', '--model', 'bc', '--run', str(root),
+                                   '--checkpoint', argument, '--splits', 'id'])
+    cli.main()  # Uses the saved config without --config.
+    assert loads == ['bc'] and envs[-1].closed
+    assert 'bc.step00002000/id | success 1/2 (50.0%)' in capsys.readouterr().out
+    after = {p: p.read_bytes() for p in root.rglob('*') if p.is_file()}
+    assert before == after
+
+
+def test_explicit_best_file_also_does_not_save(evaluation_run):
+    root, cfg, loads, envs = evaluation_run
+    before = {p: p.read_bytes() for p in root.rglob('*') if p.is_file()}
+    report = cli.evaluate_policies(root, cfg, models=['bc'], splits=['id'], checkpoint='bc.pt')
+    assert report['bc']['id']['checkpoint'] == str((root / 'bc.pt').resolve())
+    assert before == {p: p.read_bytes() for p in root.rglob('*') if p.is_file()}
+
+
+def test_missing_snapshot_fails_without_outputs_or_environment(evaluation_run):
+    root, cfg, loads, envs = evaluation_run
+    with pytest.raises(FileNotFoundError, match='Checkpoint not found'):
+        cli.evaluate_policies(root, cfg, models=['bc'], checkpoint='bc.step00009999.pt')
+    assert not loads and not envs and not (root / 'data').exists()
+
+
+def test_checkpoint_requires_a_single_policy(evaluation_run):
+    root, cfg, loads, envs = evaluation_run
+    with pytest.raises(ValueError, match='exactly one'):
+        cli.evaluate_policies(root, cfg, checkpoint='bc.pt')
+    assert not loads and not envs
+
+
+@pytest.mark.parametrize('arguments', [['evaluate', '--checkpoint', 'bc.pt'], ['train', '--model', 'bc', '--checkpoint', 'bc.pt']])
+def test_cli_rejects_checkpoint_without_evaluate_and_model(monkeypatch, arguments):
+    monkeypatch.setattr('sys.argv', ['recap', *arguments])
+    with pytest.raises(SystemExit) as error:
+        cli.main()
+    assert error.value.code == 2

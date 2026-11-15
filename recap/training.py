@@ -133,7 +133,7 @@ def train_steps(root, kind, cfg, model, optimizer, train, validation, loss, scen
                 ck = dict(model=model.state_dict(), optimizer=optimizer.state_dict(), epoch=epoch, global_step=step,
                           train_state=train_state, best=best, best_success=best_success, history=history,
                           rng=torch.get_rng_state(), cuda_rng=torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
-                          config=cfg)
+                          config=cfg,model_kind=kind)
                 save_checkpoint(root / f'{kind}.last.pt', ck)
                 if improved: save_checkpoint(root / f'{kind}.pt', ck)
                 if snapshot: save_checkpoint(snapshots / f'{kind}.step{step:08d}.pt', ck)

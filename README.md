@@ -48,6 +48,16 @@ recap evaluate --model bc --run runs/seed42 --config runs/seed42/config.json --s
 
 单策略评测输出每个数据集、每种场景难度和所选场景总体的成功率，报告写入 `evaluation.bc.json`，轨迹写入 `data/<split>/bc`。已有 `value.pt` 时同时计算 Value 误差。省略 `--model` 时评测 BC、SFT、RECAP 并写入 `evaluation.json`，同时保存各自独立报告。
 
+评测某个更新步的 checkpoint：
+
+```bash
+recap evaluate --model bc --run runs/seed42 --checkpoint bc.step00002000.pt
+# 只评测 ID
+recap evaluate --model bc --run runs/seed42 --checkpoint bc.step00002000.pt --splits id
+```
+
+指定 `--checkpoint` 时只在终端报告结果，不保存 JSON 或轨迹，不修改 `bc.pt` 和已有评测结果。不指定时仍评测默认的 `bc.pt` 并记录。文件名会依次在运行目录及其 `checkpoints` 子目录查找，也可传入相对运行目录的路径或绝对路径。使用 `--checkpoint` 必须明确 `--model`，同样支持 SFT、RECAP。`evaluate` 省略 `--config` 时优先读取该运行保存的 `config.json`；快照与运行的环境配置不一致时会拒绝评测，防止误用新旧控制设置。
+
 环境观测、保存的 `observation` / `next_observation` 和 BC、SFT、Value、RECAP 全部使用 **9D 观测**，彻底移除两维关节速度。RECAP 追加三维条件后网络输入为 12D。旧的 `train.policy_use_velocity` 设置已移除。MuJoCo 仍正常模拟物理速度与惯性，速度不暴露给模型或保存到观测中。由于相同姿态可能具有不同物理速度，9D 观测不再包含完整动力学状态，Value 预测也受此信息限制。
 
 默认训练使用 **AdamW、学习率 0.001、weight_decay=0.0001、8000 个优化器更新步**。`train.max_steps` 非空时优先于 `epochs`；一个 step 指一个 batch 的参数更新。默认每 `train.validation_steps: 500` 步验证一次，第 1 步和最后一步也验证。BC 对全部 validation 场景执行闭环评测，优先按成功率、成功率相同时按 validation MSE 保存 `bc.pt`；SFT、Value 和 RECAP 按各自 validation loss 选模。测试集合不参与选择。

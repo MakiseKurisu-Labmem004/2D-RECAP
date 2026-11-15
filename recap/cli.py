@@ -41,15 +41,40 @@ def device(cfg):
     return ('cuda' if torch.cuda.is_available() else 'cpu') if cfg['device']=='auto' else cfg['device']
 
 
-def load_model(root,name,cfg):
-    ck=torch.load(root/f'{name}.pt',map_location=device(cfg),weights_only=False)
+def resolve_checkpoint(root,checkpoint):
+    path=Path(checkpoint)
+    candidates=[path] if path.is_absolute() else [Path(root)/path]
+    if not path.is_absolute():
+        if path.parent==Path('.'): candidates.append(Path(root)/'checkpoints'/path)
+        candidates.append(path)
+    for candidate in candidates:
+        if candidate.is_file(): return candidate.resolve()
+    raise FileNotFoundError(f'Checkpoint not found: {checkpoint}; tried '+', '.join(str(p) for p in candidates))
+
+
+def checkpoint_label(name,path):
+    label=path.stem
+    if label==name: label=f'{name}.checkpoint'
+    elif not label.startswith(f'{name}.'): label=f'{name}.{label}'
+    return ''.join(c if c.isalnum() or c in '._-' else '_' for c in label)
+
+
+def load_model(root,name,cfg,checkpoint=None):
+    path=Path(checkpoint) if checkpoint is not None else root/f'{name}.pt'
+    ck=torch.load(path,map_location=device(cfg),weights_only=False)
     check_checkpoint_observations(ck,name)
     model_cfg=ck.get('config',cfg)
+    if checkpoint is not None and model_cfg['env']!=cfg['env']:
+        raise ValueError('Checkpoint environment differs from this run; evaluate with its matching run/config.json')
     model=Model(name,model_cfg['train'],model_cfg['env']['action_limit']).to(device(cfg))
-    model.load_state_dict(ck['model']); model.eval(); return model
+    model.load_state_dict(ck['model']); model.eval()
+    model.checkpoint_info=dict(path=str(path.resolve()),step=ck.get('global_step'),epoch=ck.get('epoch'))
+    return model
 
 
 def check_checkpoint_observations(checkpoint,kind):
+    if checkpoint.get('model_kind',kind)!=kind:
+        raise ValueError(f'Checkpoint contains {checkpoint["model_kind"]}, but --model is {kind}')
     expected=OBSERVATION_DIM+(3 if kind=='recap' else 0)
     if checkpoint['model']['net.0.weight'].shape[1]!=expected:
         raise ValueError(f'{kind} checkpoint uses the old observation layout. '
@@ -193,7 +218,8 @@ def fit(root,kind,cfg,resume=False):
                     if improved: best_success=success; best=validation
             else: best=min(best,validation)
             ck=dict(model=model.state_dict(),optimizer=optimizer.state_dict(),epoch=epoch,best=best,history=history,
-                    best_success=best_success,rng=torch.get_rng_state(),cuda_rng=torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,config=cfg)
+                    best_success=best_success,rng=torch.get_rng_state(),cuda_rng=torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+                    config=cfg,model_kind=kind)
             save_checkpoint(last,ck)
             if improved: save_checkpoint(root/f'{kind}.pt',ck)
             epochs.set_postfix(train=f'{total/len(x):.5f}',validation=f'{validation:.5f}')
@@ -201,9 +227,13 @@ def fit(root,kind,cfg,resume=False):
     save_json(root/f'{kind}.history.json',history)
 
 
-def evaluate_policies(root,cfg,models=None,splits=None):
+def evaluate_policies(root,cfg,models=None,splits=None,checkpoint=None):
     root=Path(root)
     models=['bc','sft','recap'] if models is None else models
+    if checkpoint is not None and len(models)!=1:
+        raise ValueError('A checkpoint requires exactly one policy model')
+    selected_checkpoint=resolve_checkpoint(root,checkpoint) if checkpoint is not None else None
+    save=selected_checkpoint is None
     scenes=json.loads((root/'scenes.json').read_text())
     selected=list(dict.fromkeys(splits)) if splits is not None else [name for name in scenes if name not in ('train','validation') and scenes[name]]
     if not selected or any(name not in scenes or not scenes[name] for name in selected):
@@ -211,23 +241,32 @@ def evaluate_policies(root,cfg,models=None,splits=None):
     for name in models:
         if name not in ('bc','sft','recap'):
             raise ValueError('Evaluate supports bc, sft, and recap policies')
-        if not (root/f'{name}.pt').is_file():
+        if selected_checkpoint is None and not (root/f'{name}.pt').is_file():
             raise FileNotFoundError(root/f'{name}.pt')
+    chosen=load_model(root,models[0],cfg,checkpoint=selected_checkpoint) if selected_checkpoint is not None else None
+    if chosen is not None:
+        info=getattr(chosen,'checkpoint_info',{})
+        tqdm.write(f'Checkpoint: {selected_checkpoint}'+(f" (step {info['step']})" if info.get('step') is not None else ''))
     value=load_model(root,'value',cfg) if (root/'value.pt').is_file() else None
     report={}; env=ObstacleReach2D(cfg['env'])
     try:
         for name in models:
-            model=load_model(root,name,cfg); report[name]={}; all_episodes=[]
+            model=chosen if chosen is not None else load_model(root,name,cfg)
+            label=checkpoint_label(name,selected_checkpoint) if selected_checkpoint is not None else name
+            report[name]={}; all_episodes=[]
             for split in selected:
-                with tqdm(scenes[split],desc=f'Evaluate {name}/{split}',unit='episode',dynamic_ncols=True) as progress:
-                    eps=[rollout(env,scene,policy(model),cfg['seed']+20000000+i,name) for i,scene in enumerate(progress)]
+                with tqdm(scenes[split],desc=f'Evaluate {label}/{split}',unit='episode',dynamic_ncols=True) as progress:
+                    eps=[rollout(env,scene,policy(model),cfg['seed']+20000000+i,label) for i,scene in enumerate(progress)]
                 if value is not None: annotate(eps,value,cfg)
-                for ep in eps: store(root,split,name,ep)
+                if save:
+                    for ep in eps: store(root,split,label,ep)
                 metrics=episode_metrics(eps)
                 metrics['by_difficulty']=difficulty_metrics(eps,scenes[split])
+                if selected_checkpoint is not None:
+                    metrics.update(checkpoint=str(selected_checkpoint),checkpoint_step=getattr(model,'checkpoint_info',{}).get('step'))
                 report[name][split]=metrics
                 all_episodes.extend(eps)
-                tqdm.write(f"{name}/{split} | success {metrics['success_count']}/{metrics['episodes']} ({metrics['success_rate']:.1%})")
+                tqdm.write(f"{label}/{split} | success {metrics['success_count']}/{metrics['episodes']} ({metrics['success_rate']:.1%})")
                 if 'strict_success_count' in metrics and float(eps[0]['strict_success_distance']) < float(eps[0]['success_distance']):
                     tqdm.write(f"  strict {float(eps[0]['strict_success_distance'])*100:g} cm | success "
                                f"{metrics['strict_success_count']}/{metrics['episodes']} ({metrics['strict_success_rate']:.1%}); "
@@ -237,10 +276,10 @@ def evaluate_policies(root,cfg,models=None,splits=None):
             if name=='recap' and 'bc' in report:
                 for split in selected:
                     report[name][split]['gain_over_bc']=report[name][split]['success_rate']-report['bc'][split]['success_rate']
-            save_json(root/f'evaluation.{name}.json',{name:report[name]})
+            if save: save_json(root/f'evaluation.{label}.json',{name:report[name]})
             overall=episode_metrics(all_episodes)
-            tqdm.write(f"{name} overall | success {overall['success_count']}/{overall['episodes']} ({overall['success_rate']:.1%})")
-        if len(models)>1: save_json(root/'evaluation.json',report)
+            tqdm.write(f"{label} overall | success {overall['success_count']}/{overall['episodes']} ({overall['success_rate']:.1%})")
+        if save and len(models)>1: save_json(root/'evaluation.json',report)
     finally:
         env.close()
     return report
@@ -248,16 +287,20 @@ def evaluate_policies(root,cfg,models=None,splits=None):
 
 def main():
     p=argparse.ArgumentParser(); p.add_argument('command',choices=['generate','train','rollout','evaluate','plot','all','migrate'])
-    p.add_argument('--config',default='configs/default.yaml'); p.add_argument('--run',default='runs/default')
+    p.add_argument('--config',help='Configuration file; evaluate defaults to the saved run config, other commands to configs/default.yaml')
+    p.add_argument('--run',default='runs/default')
     p.add_argument('--model',choices=['bc','sft','value','recap'],
                    help='Train this model or evaluate this policy. Defaults to bc for train and all policies for evaluate.')
     p.add_argument('--resume',action='store_true')
+    p.add_argument('--checkpoint',help='For evaluate --model: checkpoint path, relative to the run or absolute; bare names also search run/checkpoints')
     p.add_argument('--output-run',help='Destination for migrate: a new run with 9D trajectory data and no old checkpoints.')
     p.add_argument('--lr',type=float,help='Learning rate in the new run created by migrate.')
     p.add_argument('--train-config',help='For migrate: merge the train section of this YAML into the new run configuration.')
     p.add_argument('--splits',nargs='+',choices=(*DATASET_SPLITS,'goal_ood','composition_ood'),
                    help='Generate or evaluate only these datasets. Combine generate with --resume to skip completed datasets.')
     args=p.parse_args()
+    if args.checkpoint and (args.command!='evaluate' or not args.model):
+        p.error('--checkpoint requires evaluate and an explicit --model')
     if args.command=='migrate':
         if not args.output_run: p.error('migrate requires --output-run')
         if args.model or args.splits or args.resume: p.error('migrate does not support --model, --splits, or --resume')
@@ -267,7 +310,10 @@ def main():
         return
     if args.output_run or args.lr is not None or args.train_config:
         p.error('--output-run, --lr, and --train-config are supported only by migrate')
-    cfg=yaml.safe_load(Path(args.config).read_text()); root=Path(args.run); root.mkdir(parents=True,exist_ok=True)
+    root=Path(args.run)
+    config_path=Path(args.config) if args.config else root/'config.json' if args.command=='evaluate' and (root/'config.json').is_file() else Path('configs/default.yaml')
+    cfg=yaml.safe_load(config_path.read_text())
+    if args.command!='evaluate': root.mkdir(parents=True,exist_ok=True)
     if args.splits and args.command not in ('generate','evaluate','all'):
         p.error('--splits is supported by generate, evaluate, and all')
     if args.command=='evaluate' and args.model=='value':
@@ -276,7 +322,7 @@ def main():
     torch.use_deterministic_algorithms(True)
     if (root/'config.json').exists() and json.loads((root/'config.json').read_text())!=cfg:
         raise ValueError('Use a new run directory for changed configurations')
-    if args.command not in ('generate','all'):
+    if args.command not in ('generate','all','evaluate'):
         save_json(root/'config.json',cfg)
     def generate():
         generate_datasets(root,cfg,selected=args.splits,resume=args.resume)
@@ -293,7 +339,7 @@ def main():
     def evaluate():
         models=[args.model] if args.command=='evaluate' and args.model else None
         selected=args.splits if args.command=='evaluate' else None
-        evaluate_policies(root,cfg,models=models,splits=selected)
+        evaluate_policies(root,cfg,models=models,splits=selected,checkpoint=args.checkpoint)
     def plot():
         import matplotlib
         matplotlib.use('Agg')
