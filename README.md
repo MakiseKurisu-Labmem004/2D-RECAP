@@ -48,6 +48,19 @@ recap evaluate --model bc --run runs/seed42 --config runs/seed42/config.json --s
 
 单策略评测输出每个数据集、每种场景难度和所选场景总体的成功率，报告写入 `evaluation.bc.json`，轨迹写入 `data/<split>/bc`。已有 `value.pt` 时同时计算 Value 误差。省略 `--model` 时评测 BC、SFT、RECAP 并写入 `evaluation.json`，同时保存各自独立报告。
 
+新训练的 BC 默认屏蔽观测中的两维关节速度，避免依赖专家轨迹中“速度与动作高度相关”的捷径而无法从静止状态启动。环境与 NPZ 仍保存完整 11D 状态，Value 始终使用速度。SFT 继承 BC 的速度设置，新训练的 RECAP 默认同样屏蔽速度。需要做消融时，可在新运行的 YAML 中设置 `train.policy_use_velocity: true`。
+
+BC 在第 1 轮、每 10 轮和最后一轮对全部 validation 场景执行闭环评测，优先按成功率、成功率相同时按 validation MSE 保存 `bc.pt`；`bc.last.pt` 保存最近一轮。`bc.history.json` 的相应记录增加 `validation_success_rate`。可用 `train.validation_rollout_interval` 调整间隔，设为 `0` 时仅按 MSE 选模。测试集合不参与选择。SFT、Value 和 RECAP 仍按各自 validation loss 选模。
+
+速度设置和选模间隔保存在 checkpoint 中。加载旧 checkpoint 保留原有速度输入；`--resume` 也保留原训练行为。要对已有数据应用 BC 修复，重新训练并评测：
+
+```bash
+recap train --model bc --run runs/seed42 --config runs/seed42/config.json
+recap evaluate --model bc --run runs/seed42 --config runs/seed42/config.json --splits id
+```
+
+这会更新该目录的 BC 权重与训练历史。后续实验应使用新 BC 重新采集 rollout，再训练 SFT、Value 和 RECAP。
+
 `recap all` 顺序完成上述步骤。默认 200 条训练专家轨迹、400 条自主轨迹，另有独立 validation 和六个测试集合。生成成本可能较高，先运行 smoke。生成器达到尝试预算仍不足时会报错，不能把规划失败解释为场景不可解。已有场景 manifest 不允许覆盖；不同实验配置使用不同目录。多训练种子修改 YAML seed 并使用各自目录；如需跨种子严格共享测试集，应在实验前显式准备共享 manifest，目前没有跨运行聚合命令。
 
 ## 模块与数据
@@ -63,13 +76,13 @@ recap evaluate --model bc --run runs/seed42 --config runs/seed42/config.json --s
 
 200 步任务最差回报为 -349，因此统一使用 horizon+149 归一化，避免原文针对 100 步的 249 尺度造成越界。成功终止奖励 0，其余普通步 -1，碰撞、约束和超时终止 -150。gamma=1，所有终止（含超时）取消 bootstrap。默认 TD horizon=10。quantile 筛选只表示排名，不能称为正优势。
 
-RECAP 使用 null NLL + alpha×高优势 NLL，另以 0.1 权重学习低条件，条件 dropout 可配置。Gaussian 标签在边界做 1e-6 数值裁剪，以避免 atanh 无穷；评测使用 tanh(mean)。BC/SFT 使用以动作范围归一化的 MSE。SFT 从 BC checkpoint 初始化，保留专家并加入成功 rollout；RECAP 从随机 Gaussian 网络训练。Value 使用专家和混合 rollout，validation 按场景独立；模型保存最佳 validation checkpoint 和最近训练状态。
+RECAP 使用 null NLL + alpha×高优势 NLL，另以 0.1 权重学习低条件，条件 dropout 可配置。Gaussian 标签在边界做 1e-6 数值裁剪，以避免 atanh 无穷；评测使用 tanh(mean)。BC/SFT 使用以动作范围归一化的 MSE。SFT 从 BC checkpoint 初始化，保留专家并加入成功 rollout；RECAP 从随机 Gaussian 网络训练。Value 使用专家和混合 rollout，validation 按场景独立；模型保存最佳验证 checkpoint 和最近训练状态。
 
 ## 验证状态与限制
 
-代码已在当前开发环境执行 Python 语法编译检查；遵照服务器运行要求，没有安装本地研究依赖，也没有执行 MuJoCo/PyTorch 测试或训练。服务器 `pytest` 和 smoke 必须通过后再启动完整实验；不能将此仓库视为已经通过动力学验收或达到任何成功率。
+当前开发环境已使用真实 PyTorch 与 MuJoCo 3.3.7 执行完整测试，以及现有专家数据上的 BC 对照训练与闭环评测。本地依赖装在临时隔离目录中。单次、单种子的结果不能视为稳定成功率保证；服务器仍应执行 `pytest -q` 和 smoke 检查。
 
-生成器按几何与执行指标分类 easy/medium/hard，并按配置的配额验收。专家采用逐路点限幅跟踪与捷径平滑，没有高级时间参数化。规划插值为有限分辨率验证，不是数学意义的连续碰撞证明。当前图表包括 loss 和单轨迹 Value/Return/Advantage、机械臂路径；尚未实现难度匹配子集、跨种子聚合、优势 oracle/标签准确率、排序相关性报告、成功率训练曲线、多轮 RECAP、专家纠偏和仿真状态分支接口。上述功能不应报告为已完成。没有为达到预期成功率修改标签或筛选测试结果。
+生成器按几何与执行指标分类 easy/medium/hard，并按配置的配额验收。专家采用逐路点限幅跟踪与捷径平滑，没有高级时间参数化。规划插值为有限分辨率验证，不是数学意义的连续碰撞证明。当前图表包括 loss 和单轨迹 Value/Return/Advantage、机械臂路径；BC 历史保存定期验证成功率，尚未绘制对应曲线。尚未实现难度匹配子集、跨种子聚合、优势 oracle/标签准确率、排序相关性报告、多轮 RECAP、专家纠偏和仿真状态分支接口。上述功能不应报告为已完成。没有为达到预期成功率修改标签或筛选测试结果。
 
 目标和障碍物中心采用覆盖四个象限的环带采样。角度在 [-π, π) 内均匀采样，半径为 sqrt(U(r_min², r_max²))，使候选点按面积均匀分布。默认障碍物中心距原点 0.20～0.80 m，各集合共用该分布。目标距离和障碍物中心距离可在 YAML 的 `sampling` 中调整。
 

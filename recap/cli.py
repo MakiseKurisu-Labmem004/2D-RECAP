@@ -1,4 +1,5 @@
 import argparse
+import copy
 import json
 from pathlib import Path
 import random
@@ -35,7 +36,8 @@ def device(cfg):
 
 def load_model(root,name,cfg):
     ck=torch.load(root/f'{name}.pt',map_location=device(cfg),weights_only=False)
-    model=Model(name,cfg['train'],cfg['env']['action_limit']).to(device(cfg))
+    model_cfg=ck.get('config',cfg)
+    model=Model(name,model_cfg['train'],model_cfg['env']['action_limit']).to(device(cfg))
     model.load_state_dict(ck['model']); model.eval(); return model
 
 
@@ -58,7 +60,27 @@ def annotate(eps,model,cfg):
 
 
 def fit(root,kind,cfg,resume=False):
+    cfg=copy.deepcopy(cfg)
     tc=cfg['train']; dev=device(cfg)
+    last=root/f'{kind}.last.pt'
+    checkpoint=torch.load(last,map_location=dev,weights_only=False) if resume and last.exists() else None
+    source=load_model(root,'bc',cfg) if kind=='sft' else None
+    saved_train=checkpoint.get('config',{}).get('train',{}) if checkpoint else {}
+    if kind!='value':
+        saved_velocity=saved_train.get('policy_use_velocity',True)
+        if checkpoint and 'policy_use_velocity' in tc and tc['policy_use_velocity']!=saved_velocity:
+            raise ValueError('Resume with the checkpoint policy_use_velocity setting')
+        if checkpoint: velocity_default=saved_velocity
+        elif source is not None: velocity_default=source.use_velocity
+        else: velocity_default=False
+        tc.setdefault('policy_use_velocity',velocity_default)
+    interval_default=saved_train.get('validation_rollout_interval',0) if checkpoint else 10
+    if kind=='bc' and checkpoint and tc.get('validation_rollout_interval',interval_default)!=interval_default:
+        raise ValueError('Resume with the checkpoint validation_rollout_interval setting')
+    validation_interval=tc.get('validation_rollout_interval',interval_default) if kind=='bc' else 0
+    if not isinstance(validation_interval,int) or isinstance(validation_interval,bool) or validation_interval<0:
+        raise ValueError('validation_rollout_interval must be a nonnegative integer')
+    tc['validation_rollout_interval']=validation_interval
     train=episodes(root,'train'); val=episodes(root,'validation')
     if kind!='bc':
         train+=episodes(root,'train','rollout'); val+=episodes(root,'validation','rollout')
@@ -88,12 +110,13 @@ def fit(root,kind,cfg,resume=False):
         return tuple(torch.tensor(a,dtype=torch.float32,device=dev) for a in (x,y,label))
     x,y,labels=tensors(train); vx,vy,vl=tensors(val)
     model=Model(kind,tc,cfg['env']['action_limit']).to(dev)
-    if kind=='sft': model.load_state_dict(load_model(root,'bc',cfg).state_dict())
+    if source is not None: model.load_state_dict(source.state_dict())
     optimizer=torch.optim.Adam(model.parameters(),lr=tc['lr']); start=0; best=float('inf'); history=[]
-    last=root/f'{kind}.last.pt'
-    if resume and last.exists():
-        ck=torch.load(last,map_location=dev,weights_only=False); model.load_state_dict(ck['model']); optimizer.load_state_dict(ck['optimizer'])
+    best_success=-1.
+    if checkpoint:
+        ck=checkpoint; model.load_state_dict(ck['model']); optimizer.load_state_dict(ck['optimizer'])
         start=ck['epoch']+1; best=ck['best']; history=ck['history']
+        best_success=ck.get('best_success',-1.)
         torch.set_rng_state(ck['rng'].cpu())
         if dev.startswith('cuda') and ck.get('cuda_rng') is not None: torch.cuda.set_rng_state_all(ck['cuda_rng'])
     def loss(a,b,l,training):
@@ -104,6 +127,13 @@ def fit(root,kind,cfg,resume=False):
         condition=l.long()
         if training: condition=torch.where(torch.rand(len(a),device=dev)<tc['dropout'],null,condition)
         return model.nll(a,b,null).mean()+tc['alpha']*(l*model.nll(a,b,condition)).mean()+tc['low_weight']*((1-l)*model.nll(a,b,condition)).mean()
+    validation_scenes=[]
+    if validation_interval:
+        manifest=json.loads((root/'scenes.json').read_text())
+        validation_scenes=manifest.get('validation',[])
+        if not validation_scenes: raise ValueError('BC closed-loop validation requires validation scenes')
+    if kind!='value':
+        tqdm.write(f'{kind} policy_use_velocity={model.use_velocity}, validation_rollout_interval={validation_interval}')
     with tqdm(range(start,tc['epochs']),total=tc['epochs'],initial=start,
               desc=f'Train {kind}',unit='epoch',dynamic_ncols=True) as epochs:
         for epoch in epochs:
@@ -115,9 +145,23 @@ def fit(root,kind,cfg,resume=False):
             model.eval()
             with torch.no_grad(): validation=loss(vx,vy,vl,False).item()
             history.append(dict(epoch=epoch,train=total/len(x),validation=validation))
-            improved=validation<best; best=min(best,validation)
+            improved=validation<best
+            if validation_interval:
+                improved=False
+                if epoch==0 or (epoch+1)%validation_interval==0 or epoch+1==tc['epochs']:
+                    env=ObstacleReach2D(cfg['env'])
+                    try:
+                        with tqdm(validation_scenes,desc='BC validation rollout',unit='episode',leave=False,dynamic_ncols=True) as progress:
+                            results=[rollout(env,scene,policy(model),cfg['seed']+30000000+i,'bc-validation')
+                                     for i,scene in enumerate(progress)]
+                    finally: env.close()
+                    success=float(np.mean([ep['success'][-1] for ep in results]))
+                    history[-1]['validation_success_rate']=success
+                    improved=success>best_success or (success==best_success and validation<best)
+                    if improved: best_success=success; best=validation
+            else: best=min(best,validation)
             ck=dict(model=model.state_dict(),optimizer=optimizer.state_dict(),epoch=epoch,best=best,history=history,
-                    rng=torch.get_rng_state(),cuda_rng=torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,config=cfg)
+                    best_success=best_success,rng=torch.get_rng_state(),cuda_rng=torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,config=cfg)
             torch.save(ck,last)
             if improved: torch.save(ck,root/f'{kind}.pt')
             epochs.set_postfix(train=f'{total/len(x):.5f}',validation=f'{validation:.5f}')
