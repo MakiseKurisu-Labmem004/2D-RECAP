@@ -1,0 +1,10 @@
+{
+  "baseline": {},
+  "lr5e4": {"lr": 0.0005},
+  "lr3e4": {"lr": 0.0003},
+  "shallow128": {"depth": 3},
+  "shallow128-lr5e4": {"depth": 3, "lr": 0.0005},
+  "shallow256": {"depth": 3, "width": 256},
+  "shallow256-lr5e4": {"depth": 3, "width": 256, "lr": 0.0005},
+  "anchors64": {"goal_anchor_samples": 64}
+}

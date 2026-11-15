@@ -89,7 +89,7 @@ python scripts/sweep_bc.py --run runs/seed42 --output runs/bc-sweep-10k --lrs 0.
 
 后续 [20000 步对照](docs/experiments/bc_adamw_20k_seed42.md) 固定 batch size=256，比较 lr=0.001 与 0.0005：两组最佳 validation 均为 73.3%，按较低 MSE 选中 lr=0.0005 的第 14000 步 checkpoint，ID 为 34/50（68%）。训练更久未持续改善闭环成功率，仍应保留中间最优模型。
 
-`recap all` 顺序完成上述步骤。默认 200 条训练专家轨迹、400 条自主轨迹，另有独立 validation 和六个测试集合。生成成本可能较高，先运行 smoke。生成器达到尝试预算仍不足时会报错，不能把规划失败解释为场景不可解。已有场景 manifest 不允许覆盖；不同实验配置使用不同目录。多训练种子修改 YAML seed 并使用各自目录；如需跨种子严格共享测试集，应在实验前显式准备共享 manifest，目前没有跨运行聚合命令。
+`recap all` 顺序完成上述步骤。默认 200 条训练专家轨迹、400 条自主轨迹，另有独立 validation 和六个测试集合。生成成本可能较高，先运行 smoke。生成器达到尝试预算仍不足时会报错，不能把规划失败解释为场景不可解。已有场景 manifest 不允许覆盖；不同实验配置使用不同目录。多训练种子修改 YAML seed 并使用各自目录；如需跨种子严格共享测试集，应在实验前显式准备共享 manifest；BC 搜索脚本支持冻结同一份场景后聚合多个训练种子。
 
 ## 平滑专家与近目标纠偏
 
@@ -121,7 +121,57 @@ BC 新增 `train.goal_anchor_samples: 16`：仅在 train 场景的安全 IK 解�
 
 此前的 20 Hz、3 cm、分段 quintic 历史对照中，530 条平滑专家均执行成功，峰值 jerk 的中位数降低约 77%；平滑数据加近目标监督的 8000 步 BC 对照 ID 为 64%，仅在旧专家上增加近目标监督时为 72%。这些数据不属于当前 50 Hz、C³、3.5 cm 配置，详见 [历史检查记录](docs/experiments/expert_smooth_goal_stall_seed42.md)。
 
-当前实现已通过 149 项测试、含 hard 配额的从零生成完整 smoke，以及 step/epoch 两种训练模式检查。在同一批 24 个固定场景、相同 200 Hz 物理采样和 3.5 cm 成功标准下，旧 20 Hz quintic 为 24/24 成功，新 50 Hz 慢速 C³ 为 20/24；4 个失败均为 10 秒预算内未完成。在两组都成功的 20 个场景中，每条轨迹峰值物理 jerk 的中位数为 10245→463 rad/s³，子步控制目标跳变为 0.03139→0.00287 rad，中位执行时间为 4.225→6.69 秒。该对照同时改变速度、动作上限、样条和控制频率，不能将效果单独归因于某一项，也不代表 BC 策略成功率。详情见 [验证数据](docs/experiments/c3_50hz_verification.json) 和 [对照图](docs/experiments/c3_50hz_comparison.png)。
+当前实现已通过 161 项测试、含 hard 配额的从零生成完整 smoke，以及 step/epoch 两种训练模式检查。在同一批 24 个固定场景、相同 200 Hz 物理采样和 3.5 cm 成功标准下，旧 20 Hz quintic 为 24/24 成功，新 50 Hz 慢速 C³ 为 20/24；4 个失败均为 10 秒预算内未完成。在两组都成功的 20 个场景中，每条轨迹峰值物理 jerk 的中位数为 10245→463 rad/s³，子步控制目标跳变为 0.03139→0.00287 rad，中位执行时间为 4.225→6.69 秒。该对照同时改变速度、动作上限、样条和控制频率，不能将效果单独归因于某一项，也不代表 BC 策略成功率。详情见 [验证数据](docs/experiments/c3_50hz_verification.json) 和 [对照图](docs/experiments/c3_50hz_comparison.png)。
+
+## 当前 BC 配置搜索（2026-11-15）
+
+本轮使用 `runs/seed42-smooth` 中完整的 **50 Hz、C³ spline、9D** 数据，与上述 20 Hz 历史实验分开统计。固定 200 个 train 场景、30 个 validation 场景和六类各 50 个测试场景；难度配比为 70%/20%/10%。已核验 530 个场景 ID 和几何互不重复、专家全部成功，轨迹元数据与当前环境一致。成功标准始终为 3.5 cm、保持 13 步，未通过修改环境提高分数。
+
+首轮固定 seed42、AdamW、weight decay=1e-4、batch size=256，各训练 8000 步，每 500 步用完整 validation 的闭环成功率选择 checkpoint；成功率相同再比较动作 MSE。
+
+| 学习率 | 网络（隐藏层×宽度） | goal_anchor_samples | 最佳步数 | validation |
+|---|---|---:|---:|---:|
+| 0.001 | 6×128 | 16（默认） | 2000 | 21/30，70.0% |
+| 0.0005 | 6×128 | 16 | 5000 | 22/30，73.3% |
+| 0.0003 | 6×128 | 16 | 7000 | 20/30，66.7% |
+| 0.001 | 3×128 | 16 | 4500 | 19/30，63.3% |
+| 0.0005 | 3×128 | 16 | 6000 | 17/30，56.7% |
+| 0.001 | 3×256 | 16 | 2000 | 17/30，56.7% |
+| 0.0005 | 3×256 | 16 | 4500 | 17/30，56.7% |
+| 0.001 | 6×128 | 64 | 2000 | 24/30，80.0% |
+
+前两名扩展到 20000 步，并固定同一份场景用训练种子 42、43、44 复验。`lr=0.001, goal_anchor_samples=64` 的三个最佳 validation 为 80.0%、83.3%、73.3%，平均 **78.9%**，且最佳 checkpoint 都在第 **2000** 步；`lr=0.0005, goal_anchor_samples=16` 的平均为 73.3%，最佳步数分别为 5000、4000、4500。依据三种子平均 validation 成功率锁定前者后，再开启测试集；这里的“最佳”只指本轮比较范围，30 个固定验证场景和三个训练种子不能代表所有数据种子的稳定排序。
+
+| 测试集合 | 默认配置，seed42 | 推荐配置，seed42 | 推荐配置，三训练种子平均 |
+|---|---:|---:|---:|
+| id | 29/50，58% | 34/50，68% | 64.0% |
+| inner_goal_ood | 9/50，18% | 20/50，40% | 41.3% |
+| outer_goal_ood | 7/50，14% | 13/50，26% | 28.0% |
+| size_ood | 22/50，44% | 30/50，60% | 58.7% |
+| inner_composition_ood | 6/50，12% | 14/50，28% | 32.0% |
+| outer_composition_ood | 12/50，24% | 21/50，42% | 38.7% |
+| 全部测试 | 85/300，28.3% | 132/300，44.0% | 43.8% |
+
+推荐配置三个种子的测试总体为 44.0%、45.0%、42.3%，均值 43.8%、样本标准差 1.3 个百分点；这是相同 300 个场景的三次训练种子复验。提升仍主要来自 easy，三个种子合计 medium 为 12/180、hard 为 3/90 次成功，不能据此称为已解决困难绕障或 OOD 泛化。近目标静止超时仍存在：seed42 默认配置为 10/300 次，推荐配置为 17/300 次；本轮按整体成功率选择，没有将停滞指标作为优化目标。
+
+可复用配置见 [configs/bc_best.yaml](configs/bc_best.yaml)：AdamW、lr=0.001、weight decay=1e-4、batch size=256、6×128、goal_anchor_samples=64、max_steps=2000、每 500 步验证。已额外从头训练 2000 步，逐参数核对与本轮 seed42 最佳 checkpoint 完全一致。该预设用于 BC；其余模型需要各自选择训练预算。当前默认配置文件保留既有设置。
+
+```bash
+# 复用已生成的当前数据，在独立目录训练推荐 BC
+recap migrate --run runs/seed42-smooth --output-run runs/seed42-bc-best --train-config configs/bc_best.yaml
+recap train --model bc --run runs/seed42-bc-best --config runs/seed42-bc-best/config.json
+recap evaluate --model bc --run runs/seed42-bc-best
+```
+
+完整数据审计、参数、分难度结果和复现记录见 [实验结果 JSON](docs/experiments/bc_c3_search_20261115.json)，验证曲线见 [对照图](docs/experiments/bc_c3_search_20261115_curves.png)。本地权重和逐场景记录位于 `runs/experiments/bc_c3_search_20261115`，该目录按仓库既有规则被 Git 忽略。实验在 CPU、PyTorch 2.11.0 和 MuJoCo 3.3.7 上完成；不同设备和数值实现可能产生差异。
+
+新增搜索脚本将源数据复制到独立运行目录，只复制 train/validation 专家标签，完整测试几何保持一致。源模型和源运行文件不修改。首轮、复验、选择记录与逐场景测试指标保存到输出目录；相同命令可恢复训练，并保留已经完成的首轮选择记录。
+
+```bash
+# CPU 并行执行本轮对照
+python scripts/search_bc.py --run runs/seed42-smooth --output runs/experiments/bc-c3-search --plan configs/bc_search.json --steps 8000 --extend-steps 20000 --seeds 42 43 44 --finalists 2 --workers 4 --threads 1 --device cpu
+# 单 GPU：使用 --workers 1 --device cuda；不同时启动多个训练进程占用同一 GPU
+```
 
 ## 模块与数据
 
@@ -145,7 +195,7 @@ RECAP 使用 null NLL + alpha×高优势 NLL，另以 0.1 权重学习低条件�
 
 当前开发环境已使用真实 PyTorch 与 MuJoCo 3.3.7 执行完整测试，以及现有专家数据上的 BC 对照训练与闭环评测。本地依赖装在临时隔离目录中。单次、单种子的结果不能视为稳定成功率保证；服务器仍应执行 `pytest -q` 和 smoke 检查。
 
-生成器按几何与执行指标分类 easy/medium/hard，并按配置的配额验收。新专家为全局 C³ 样条；旧配置保留 quintic 和逐路点跟踪。初始直线规划仍使用有限分辨率检查，最终样条使用保守的整曲线间隙检查，实际动力学跟踪继续依赖逐物理步执行验收。当前图表包括 loss 和单轨迹 Value/Return/Advantage、机械臂路径；BC 历史保存定期验证成功率，sweep 脚本可绘制曲线。尚未实现难度匹配子集、跨种子聚合、优势 oracle/标签准确率、排序相关性报告、多轮 RECAP、在线专家纠偏和仿真状态分支接口。BC 的近目标几何监督不等于在线专家纠偏。按用户要求将成功范围从 3 cm 调到 3.5 cm，并独立报告轨迹内 3 cm 指标；新旧环境结果不能直接视作模型提升。
+生成器按几何与执行指标分类 easy/medium/hard，并按配置的配额验收。新专家为全局 C³ 样条；旧配置保留 quintic 和逐路点跟踪。初始直线规划仍使用有限分辨率检查，最终样条使用保守的整曲线间隙检查，实际动力学跟踪继续依赖逐物理步执行验收。当前图表包括 loss 和单轨迹 Value/Return/Advantage、机械臂路径；BC 历史保存定期验证成功率，sweep 脚本可绘制曲线。尚未实现难度匹配子集、跨数据种子聚合、优势 oracle/标签准确率、排序相关性报告、多轮 RECAP、在线专家纠偏和仿真状态分支接口。BC 的近目标几何监督不等于在线专家纠偏。按用户要求将成功范围从 3 cm 调到 3.5 cm，并独立报告轨迹内 3 cm 指标；新旧环境结果不能直接视作模型提升。
 
 目标和障碍物中心采用覆盖四个象限的环带采样。角度在 [-π, π) 内均匀采样，半径为 sqrt(U(r_min², r_max²))，使候选点按面积均匀分布。默认障碍物中心距原点 0.20～0.80 m，各集合共用该分布。目标距离和障碍物中心距离可在 YAML 的 `sampling` 中调整。
 
