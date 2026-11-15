@@ -5,6 +5,7 @@ from .env import clearance, points, ObstacleReach2D
 from .sampling import sample_scene
 from .difficulty import DIFFICULTIES,difficulty_quotas
 from .proposals import propose_obstruction
+from .controllers import make_expert
 
 
 def ik(goal, limit):
@@ -82,6 +83,22 @@ def plan(start,goal,scene,cfg):
     return None
 
 
+def completed_goal_path(path, episode, scene, cfg):
+    # A Cartesian goal has two IK solutions. Stop at the solution the rollout
+    # actually reached, rather than retaining an unused, more distant endpoint.
+    goals = ik(np.asarray(scene['goal']), cfg['env']['joint_limit'])
+    if not goals: return path
+    goal = min(goals, key=lambda pose: np.linalg.norm(pose-episode['qpos'][-1]))
+    best = path
+    length = np.linalg.norm(np.diff(path, axis=0), axis=1).sum()
+    for index, vertex in enumerate(path):
+        if not safe_edge(vertex, goal, scene, cfg): continue
+        candidate = np.vstack((path[:index+1], goal))
+        cost = np.linalg.norm(np.diff(candidate, axis=0), axis=1).sum()
+        if cost < length - 1e-8: best, length = candidate, cost
+    return best
+
+
 def rollout(env,scene,policy,seed,version,noise=0.,limit=None):
     import time
     rng=np.random.default_rng(seed)
@@ -93,13 +110,14 @@ def rollout(env,scene,policy,seed,version,noise=0.,limit=None):
         rows.append(dict(observation=obs,action=action,next_observation=nxt,reward=r,terminated=term,
                          truncated=trunc,success=info['success'],failure_reason=info['failure_reason'],
                          applied_command=info['applied_command'],step_index=t,timestamp=time.time(),
-                         qpos=env.data.qpos.copy(),clearance=info['clearance']))
+                         qpos=env.data.qpos.copy(),clearance=info['clearance'],distance=info['distance'],
+                         goal_hold_steps=env.held))
         obs=nxt
         if term or trunc: break
     ep={k:np.asarray([row[k] for row in rows]) for k in rows[0]}
     ep.update(scene_id=np.array(scene['scene_id']),episode_id=np.array(f'{version}-{seed}'),seed=np.array(seed),
               policy_version=np.array(version),action_source=np.array('expert' if version=='expert' else 'policy'),
-              exploration=np.array(noise))
+              exploration=np.array(noise),success_distance=np.array(env.cfg['success_distance']))
     return ep
 
 
@@ -172,12 +190,20 @@ class ScenarioGenerator:
                         ):
                             reason='difficulty_quota_full'
                             continue
-                        state=[1]
-                        def expert(obs,env):
-                            if np.max(abs(path[state[0]]-env.data.qpos))<.025 and state[0]<len(path)-1: state[0]+=1
-                            return np.clip(path[state[0]]-env.data.qpos,-env.cfg['action_limit'],env.cfg['action_limit'])
+                        expert=make_expert(path,self.cfg)
                         ep=rollout(env,scene,expert,seed+attempt,'expert',limit=self.cfg['planner']['expert_limit'])
                         if not ep['success'][-1]: continue
+                        if expert.kind=='quintic':
+                            completed=completed_goal_path(path,ep,scene,self.cfg)
+                            if completed.shape!=path.shape or not np.allclose(completed,path,atol=1e-8,rtol=0):
+                                path=completed
+                                expert=make_expert(path,self.cfg)
+                                ep=rollout(env,scene,expert,seed+attempt,'expert',limit=self.cfg['planner']['expert_limit'])
+                                if not ep['success'][-1]: continue
+                            length=float(np.linalg.norm(np.diff(path,axis=0),axis=1).sum())
+                            ratio=length/max(np.linalg.norm(path[-1]-q0),1e-8)
+                            direct=safe_edge(q0,path[-1],scene,self.cfg)
+                        ep.update(expert_path=path,expert_controller=np.array(expert.kind))
                         gap=float(ep['clearance'].min())
                         difficulty='easy' if direct else 'hard' if ratio>=self.cfg['planner']['hard_ratio'] and gap<self.cfg['planner']['hard_clearance'] else 'medium'
                         if quotas is not None and counts[difficulty]>=quotas[difficulty]:

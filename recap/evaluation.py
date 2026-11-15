@@ -23,6 +23,16 @@ def episode_metrics(episodes):
     if all('value_prediction' in ep and 'mc_return' in ep for ep in episodes):
         result['value_mae'] = float(np.mean(np.abs(np.concatenate([
             ep['value_prediction'] - ep['mc_return'] for ep in episodes]))))
+    if all('distance' in ep for ep in episodes):
+        result['mean_final_distance'] = float(np.mean([ep['distance'][-1] for ep in episodes]))
+        result['mean_min_distance'] = float(np.mean([np.min(ep['distance']) for ep in episodes]))
+    if all(all(key in ep for key in ('distance', 'qpos', 'success_distance')) for ep in episodes):
+        stalls = [bool(ep['truncated'][-1]) and len(ep['qpos']) >= 20
+                  and float(ep['success_distance']) < ep['distance'][-1] <= 2*float(ep['success_distance'])
+                  and np.max(np.linalg.norm(np.diff(ep['qpos'][-20:], axis=0), axis=1)) < 1e-5
+                  for ep in episodes]
+        result['near_goal_stall_count'] = int(sum(stalls))
+        result['near_goal_stall_rate'] = float(np.mean(stalls))
     return result
 
 

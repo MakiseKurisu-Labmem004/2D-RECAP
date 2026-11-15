@@ -81,11 +81,33 @@ python scripts/sweep_bc.py --run runs/seed42 --output runs/bc-sweep-10k --lrs 0.
 
 `recap all` 顺序完成上述步骤。默认 200 条训练专家轨迹、400 条自主轨迹，另有独立 validation 和六个测试集合。生成成本可能较高，先运行 smoke。生成器达到尝试预算仍不足时会报错，不能把规划失败解释为场景不可解。已有场景 manifest 不允许覆盖；不同实验配置使用不同目录。多训练种子修改 YAML seed 并使用各自目录；如需跨种子严格共享测试集，应在实验前显式准备共享 manifest，目前没有跨运行聚合命令。
 
+## 平滑专家与近目标纠偏
+
+新配置使用 `planner.expert_controller: quintic`：在避障检查通过的每条关节空间线段上做五次时间标定，使参考轨迹在路点处的速度、加速度归零，再用位置执行器跟踪并补偿关节阻尼。默认参考速度上限为 0.6 rad/s、参考加速度上限为 2 rad/s²，路点跟踪误差小于 0.003 rad 后切换。它约束参考轨迹，实际运动仍由 MuJoCo 积分，碰撞仍在每个物理步检查。新专家预算为 200 个控制步，任务 horizon 仍为 200。旧配置缺少控制器字段时保留原 waypoint 行为。
+
+新生成时若专家实际经过另一个 IK 解到达目标，会安全截短原路径并重新执行，再按最终路径和实际间隙计算难度。原有 easy/medium/hard 配额仍执行。需要全新数据时，用新目录直接生成：
+
+```bash
+recap generate --run runs/seed42-smooth --config configs/default.yaml
+recap train --model bc --run runs/seed42-smooth --config runs/seed42-smooth/config.json
+recap evaluate --model bc --run runs/seed42-smooth --config runs/seed42-smooth/config.json
+```
+
+BC 新增 `train.goal_anchor_samples: 16`：仅在 train 场景的安全 IK 解附近，以每关节 ±0.12 rad 扰动补充局部纠偏标签，同时加入精确目标处的零动作标签。所有样本都通过关节限位和直连避障检查；它们只参与 BC 动作监督，不伪造 episode、回报或 Value 标签。设为 0 可关闭。验证/测试不添加控制器，仍直接使用策略输出。`bc.goal_anchors.json` 记录补充样本数量。
+
+成功条件仍为末端距离小于 0.03 m 并连续保持 5 步，成功结束不要求末端精确重合目标中心。新轨迹保存逐帧 `distance` 和 `goal_hold_steps`；评测增加最终距离和 `near_goal_stall_count`。停滞指超时、最终距离在成功阈值外两倍阈值内，且最后 20 帧相邻关节位移均小于 1e-5 rad。
+
+若需保留既有场景，可运行 `python scripts/rebuild_experts.py --run runs/seed42-8k --output runs/seed42-smooth-replay --config configs/default.yaml`。该工具在新目录重新执行专家，冻结场景几何和原难度分组，另存 `expert_replay_metrics` 与 `expert_replay.json`，不把重放后的指标冒充原始采样难度。迁移数据的 `recap migrate` 不会重新执行或平滑已有动作。
+
+固定场景对照中，530 条平滑专家均执行成功，峰值 jerk 的中位数降低约 77%；但平滑数据加近目标监督的 8000 步 BC 对照 ID 为 64%，未超过旧版的 66%。仅在旧专家上增加近目标监督时为 72%。平滑度提升不等于闭环成功率提升，详见 [检查记录](docs/experiments/expert_smooth_goal_stall_seed42.md)。
+
 ## 模块与数据
 
 - `recap/env.py`：2×0.5m 胶囊连杆，位置执行器，20Hz 控制，逐物理步全连杆解析碰撞检测。胶囊端帽覆盖关节及末端；不包含机器人自碰撞任务。
 - `recap/planning.py`：两分支 IK、有限关节网格 A*、插值验证、捷径平滑、实际控制器专家执行与场景验收。
 - `recap/models.py`：6×128 SiLU MLP、201-bin 插值标签、标量 Value 消融、有界 Gaussian NLL。
+- `recap/controllers.py`：兼容旧路点控制及五次时间标定的平滑专家跟踪。
+- `recap/goal_supervision.py`：只用于 BC 训练的安全近目标纠偏样本。
 - `recap/cli.py`：数据、训练、断点恢复、固定场景配对评测和静态绘图。
 
 每条 NPZ 独立保存 episode，禁止跨 episode 拼接 TD 窗口；场景参数保存在 `scenes.json`，通过 scene_id 关联。`data/<split>/expert` 中的测试专家只用于可解性证明。train 和 validation 的自主数据仅在各自场景中采集。所有评测策略共享同一测试列表，报告保存逐场景结果、Wilson 成功率区间和 RECAP 相对 BC 增益。
@@ -100,7 +122,7 @@ RECAP 使用 null NLL + alpha×高优势 NLL，另以 0.1 权重学习低条件�
 
 当前开发环境已使用真实 PyTorch 与 MuJoCo 3.3.7 执行完整测试，以及现有专家数据上的 BC 对照训练与闭环评测。本地依赖装在临时隔离目录中。单次、单种子的结果不能视为稳定成功率保证；服务器仍应执行 `pytest -q` 和 smoke 检查。
 
-生成器按几何与执行指标分类 easy/medium/hard，并按配置的配额验收。专家采用逐路点限幅跟踪与捷径平滑，没有高级时间参数化。规划插值为有限分辨率验证，不是数学意义的连续碰撞证明。当前图表包括 loss 和单轨迹 Value/Return/Advantage、机械臂路径；BC 历史保存定期验证成功率，尚未绘制对应曲线。尚未实现难度匹配子集、跨种子聚合、优势 oracle/标签准确率、排序相关性报告、多轮 RECAP、专家纠偏和仿真状态分支接口。上述功能不应报告为已完成。没有为达到预期成功率修改标签或筛选测试结果。
+生成器按几何与执行指标分类 easy/medium/hard，并按配置的配额验收。新专家有五次时间标定；旧配置仍可使用逐路点限幅跟踪。规划插值为有限分辨率验证，不是数学意义的连续碰撞证明。当前图表包括 loss 和单轨迹 Value/Return/Advantage、机械臂路径；BC 历史保存定期验证成功率，sweep 脚本可绘制曲线。尚未实现难度匹配子集、跨种子聚合、优势 oracle/标签准确率、排序相关性报告、多轮 RECAP、在线专家纠偏和仿真状态分支接口。BC 的近目标几何监督不等于在线专家纠偏。没有为达到预期成功率放宽成功条件或筛选测试结果。
 
 目标和障碍物中心采用覆盖四个象限的环带采样。角度在 [-π, π) 内均匀采样，半径为 sqrt(U(r_min², r_max²))，使候选点按面积均匀分布。默认障碍物中心距原点 0.20～0.80 m，各集合共用该分布。目标距离和障碍物中心距离可在 YAML 的 `sampling` 中调整。
 

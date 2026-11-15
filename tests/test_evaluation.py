@@ -31,6 +31,21 @@ def test_no_success_and_empty_evaluation():
         episode_metrics([])
 
 
+def test_goal_stall_is_distinct_from_success_and_normal_motion():
+    episodes = []
+    for name, success, distance, moving in [('stall', False, .032, False), ('moving', False, .032, True),
+                                            ('far', False, .3, False), ('success', True, .02, False)]:
+        ep = episode(name, success, '' if success else 'timeout', steps=25)
+        poses = np.zeros((25, 2))
+        if moving: poses[:, 0] = np.linspace(0, 1, 25)
+        ep.update(distance=np.full(25, distance), qpos=poses, success_distance=np.array(.03))
+        episodes.append(ep)
+    result = episode_metrics(episodes)
+    assert result['near_goal_stall_count'] == 1 and result['near_goal_stall_rate'] == .25
+    assert result['mean_final_distance'] == pytest.approx(np.mean([.032, .032, .3, .02]))
+    json.dumps(result)
+
+
 @pytest.fixture
 def evaluation_run(tmp_path, monkeypatch):
     cfg = dict(seed=42, env={})

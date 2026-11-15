@@ -14,6 +14,8 @@ def controlled_generator(monkeypatch):
     cfg = yaml.safe_load(Path('configs/default.yaml').read_text())
     cfg['difficulty_ratio'] = dict(easy=.60, medium=.30, hard=.10)
     cfg['planner']['proposal'] = 'random'
+    # These tests mock poses and IK; isolate quota bookkeeping from tracking.
+    cfg['planner']['expert_controller'] = 'waypoint'
     sequence = ['easy'] * 8 + ['medium'] * 4 + ['hard']
     envs = []
 

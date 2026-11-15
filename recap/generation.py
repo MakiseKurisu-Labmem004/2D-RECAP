@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+from types import SimpleNamespace
 
 import numpy as np
 from tqdm import tqdm
@@ -15,6 +16,7 @@ from .difficulty import difficulty_quotas
 from .geometry import points
 from .planning import ScenarioGenerator, ik, local_medium_detour, plan, safe_edge
 from .observations import without_velocity, convert_episode
+from .controllers import make_expert
 
 
 def write_json(path, value):
@@ -62,9 +64,19 @@ def read_json(path, default):
     return json.loads(path.read_text(encoding='utf-8')) if path.exists() else default
 
 
-def matches_expert(path, episode, start, limit):
+def matches_expert(path, episode, start, limit, cfg=None):
     state = 1
     before = np.vstack([start, episode['qpos'][:-1]])
+    controller = str(episode.get('expert_controller', 'waypoint'))
+    if controller != 'waypoint':
+        if cfg is None:
+            raise ValueError('Smooth expert verification requires its saved configuration')
+        expert = make_expert(path, {**cfg, 'planner': {**cfg['planner'], 'expert_controller': controller}})
+        for pose, action in zip(before, episode['action']):
+            env = SimpleNamespace(data=SimpleNamespace(qpos=pose))
+            if not np.allclose(expert(None, env), action, atol=3e-6, rtol=0):
+                return False
+        return True
     for pose, action in zip(before, episode['action']):
         if np.max(np.abs(path[state] - pose)) < .025 and state < len(path) - 1:
             state += 1
@@ -92,6 +104,30 @@ def path_from_controls(episode, scene, start, cfg):
     return path if matches_expert(path, episode, start, limit) else None
 
 
+def recover_expert_path(episode, scene, cfg):
+    start = np.asarray(scene['q0'])
+    if 'expert_path' in episode:
+        path = np.asarray(episode['expert_path'])
+        if (not np.allclose(path[0], start, atol=2e-6, rtol=0)
+                or not all(safe_edge(a, b, scene, cfg) for a, b in zip(path[:-1], path[1:]))
+                or not matches_expert(path, episode, start, cfg['env']['action_limit'], cfg)):
+            raise ValueError('Saved expert path does not match the trajectory')
+        return path
+    path = path_from_controls(episode, scene, start, cfg)
+    if path is not None:
+        return path
+    goals = ik(np.array(scene['goal']), cfg['env']['joint_limit'])
+    goals.sort(key=lambda goal: np.linalg.norm(goal - episode['qpos'][-1]))
+    for goal in goals:
+        direct = safe_edge(start, goal, scene, cfg)
+        candidate = np.array([start, goal]) if direct else local_medium_detour(start, goal, scene, cfg)
+        if candidate is None or not matches_expert(candidate, episode, start, cfg['env']['action_limit']):
+            candidate = plan(start, goal, scene, cfg)
+        if candidate is not None and matches_expert(candidate, episode, start, cfg['env']['action_limit']):
+            return candidate
+    raise ValueError(f"Cannot verify the expert path for {scene['scene_id']}")
+
+
 def recover_scene(episode, split, cfg):
     if 'scene_json' in episode:
         return json.loads(episode['scene_json'].item())
@@ -103,20 +139,7 @@ def recover_scene(episode, split, cfg):
         raise ValueError('Cannot recover the initial joint angles from saved commands')
     scene = dict(scene_id=episode['scene_id'].item(), split=split, q0=start.tolist(),
                  goal=obs[4:6].tolist(), obstacle=obs[6:8].tolist(), radius=float(obs[8]))
-    goals = ik(np.array(scene['goal']), cfg['env']['joint_limit'])
-    goals.sort(key=lambda goal: np.linalg.norm(goal - episode['qpos'][-1]))
-    path = path_from_controls(episode, scene, start, cfg)
-    if path is None:
-        for goal in goals:
-            direct = safe_edge(start, goal, scene, cfg)
-            candidate = np.array([start, goal]) if direct else local_medium_detour(start, goal, scene, cfg)
-            if candidate is None or not matches_expert(candidate, episode, start, cfg['env']['action_limit']):
-                candidate = plan(start, goal, scene, cfg)
-            if candidate is not None and matches_expert(candidate, episode, start, cfg['env']['action_limit']):
-                path = candidate
-                break
-    if path is None:
-        raise ValueError(f"Cannot verify the expert path for {scene['scene_id']}")
+    path = recover_expert_path(episode, scene, cfg)
     direct = safe_edge(start, path[-1], scene, cfg)
     length = float(np.linalg.norm(np.diff(path, axis=0), axis=1).sum())
     ratio = length / max(np.linalg.norm(path[-1] - start), 1e-8)

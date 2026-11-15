@@ -69,4 +69,4 @@ def test_executable_scenario(cfg):
     cfg['planner']['max_attempts']=100
     pairs=ScenarioGenerator(cfg).generate('train',1,42)
     assert len(pairs)==1 and pairs[0][1]['success'][-1]
-    assert len(pairs[0][1]['reward'])<=100
+    assert len(pairs[0][1]['reward'])<=min(cfg['planner']['expert_limit'],cfg['env']['horizon'])

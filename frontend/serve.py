@@ -65,7 +65,15 @@ def build_index(run):
     difficulty_path = run / 'difficulty.json'
     order = {key: i for i, key in enumerate(scenes)}
     rows.sort(key=lambda row: (order[row['split']], row['source'], int(row['episode_id'].rsplit('-', 1)[-1]) if row['episode_id'].rsplit('-', 1)[-1].isdigit() else 0, row['path']))
+    histories = {p.name.removesuffix('.history.json'): json.loads(p.read_text(encoding='utf-8')) for p in sorted(run.glob('*.history.json'))}
+    evaluations = {}
+    for path in sorted(run.glob('evaluation*.json')):
+        evaluations.update(json.loads(path.read_text(encoding='utf-8')))
+    migration_path = run / 'migration.json'
     return dict(run=run.name, config=config,
+                histories=histories, evaluations=evaluations,
+                migration=json.loads(migration_path.read_text(encoding='utf-8')) if migration_path.exists() else {},
+                checkpoints=[p.name for p in sorted((run / 'checkpoints').glob('*.pt'))],
                 generation=json.loads(generation_path.read_text(encoding='utf-8')) if generation_path.exists() else {},
                 difficulty=json.loads(difficulty_path.read_text(encoding='utf-8')) if difficulty_path.exists() else {},
                 refreshed_at=datetime.now(timezone.utc).isoformat(), scenes=scenes, episodes=rows)
@@ -81,6 +89,10 @@ class RunStore:
         with self.lock:
             files = [self.run / name for name in ('config.json', 'scenes.json', 'generation.json', 'difficulty.json')]
             files.extend(sorted((self.run / 'data').glob('*/*/*.npz')))
+            files.extend(sorted(self.run.glob('*.history.json')))
+            files.extend(sorted(self.run.glob('evaluation*.json')))
+            files.extend(sorted((self.run / 'checkpoints').glob('*.pt')))
+            files.append(self.run / 'migration.json')
             signature = tuple((str(p), p.stat().st_mtime_ns, p.stat().st_size) for p in files if p.exists())
             if signature != self.signature:
                 index = build_index(self.run)
@@ -113,7 +125,7 @@ class Handler(SimpleHTTPRequestHandler):
                     return self.send_error(404)
                 return self.send_json(episode(self.run / 'data' / relative,
                     ['qpos', 'action', 'reward', 'clearance', 'success', 'failure_reason', 'scene_id', 'episode_id']))
-            if url.path not in ('/', '/index.html', '/app.js', '/style.css', '/favicon.svg'):
+            if url.path not in ('/', '/index.html', '/app.js', '/research.js', '/style.css', '/favicon.svg'):
                 return self.send_error(404)
             return super().do_GET()
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
@@ -125,7 +137,7 @@ class Handler(SimpleHTTPRequestHandler):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--run', type=Path, default=Path(__file__).resolve().parent.parent / 'runs' / 'seed42')
+    parser.add_argument('--run', type=Path, default=Path(__file__).resolve().parent.parent / 'runs' / 'seed42-8k')
     parser.add_argument('--port', type=int, default=8042)
     args = parser.parse_args()
     run = args.run.resolve()

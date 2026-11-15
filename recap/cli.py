@@ -15,6 +15,7 @@ from .generation import generate_datasets,write_json
 from .evaluation import episode_metrics,difficulty_metrics
 from .observations import OBSERVATION_DIM,convert_episode
 from .training import make_optimizer,train_steps,positive_integer,save_checkpoint
+from .goal_supervision import goal_anchors
 
 
 def save_json(path,obj):
@@ -121,6 +122,16 @@ def fit(root,kind,cfg,resume=False):
         label=np.concatenate([e['advantage_indicator'] for e in eps]) if kind=='recap' else np.zeros(len(x))
         return tuple(torch.tensor(a,dtype=torch.float32,device=dev) for a in (x,y,label))
     x,y,labels=tensors(train); vx,vy,vl=tensors(val)
+    anchor_count=tc.get('goal_anchor_samples',0) if kind=='bc' else 0
+    if anchor_count:
+        manifest=json.loads((root/'scenes.json').read_text())
+        ax,ay=goal_anchors(manifest['train'],cfg)
+        x=torch.cat([x,torch.as_tensor(ax,device=dev)])
+        y=torch.cat([y,torch.as_tensor(ay,device=dev)])
+        labels=torch.cat([labels,torch.zeros(len(ax),device=dev)])
+        save_json(root/'bc.goal_anchors.json',dict(samples=len(ax),scenes=len(manifest['train']),radius=tc.get('goal_anchor_radius',.12),
+                  note='Training-only local expert labels; no evaluation correction or altered success threshold.'))
+        tqdm.write(f'BC goal anchors: {len(ax)} training-only samples')
     model=Model(kind,tc,cfg['env']['action_limit']).to(dev)
     if source is not None: model.load_state_dict(source.state_dict())
     optimizer=make_optimizer(model,tc,saved_train if checkpoint else None)

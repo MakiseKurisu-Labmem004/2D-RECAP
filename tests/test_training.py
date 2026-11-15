@@ -16,7 +16,7 @@ from recap.models import Model
 def config():
     cfg = yaml.safe_load(Path('configs/default.yaml').read_text())
     cfg['device'] = 'cpu'
-    cfg['train'].update(width=8, depth=1, epochs=2, max_steps=None, batch_size=4, lr=0.)
+    cfg['train'].update(width=8, depth=1, epochs=2, max_steps=None, batch_size=4, lr=0., goal_anchor_samples=0)
     return cfg
 
 

@@ -27,7 +27,11 @@ planner:
   resolution: 180
   interpolation: 0.008
   max_attempts: 10000
-  expert_limit: 100
+  expert_limit: 200
+  expert_controller: quintic
+  expert_max_velocity: 0.6
+  expert_max_acceleration: 2.0
+  expert_waypoint_tolerance: 0.003
   hard_ratio: 1.5
   hard_clearance: 0.025
 data:
@@ -50,6 +54,8 @@ train:
   optimizer: adamw
   weight_decay: 0.0001
   lr: 0.001
+  goal_anchor_samples: 16
+  goal_anchor_radius: 0.12
   width: 128
   depth: 6
   bins: 201
