@@ -16,6 +16,7 @@ from .evaluation import episode_metrics,difficulty_metrics
 from .observations import OBSERVATION_DIM,convert_episode
 from .training import make_optimizer,train_steps,positive_integer,save_checkpoint
 from .goal_supervision import goal_anchors
+from .configuration import resolve_config,check_environment,check_data_spec,check_resume,save_training_config
 
 
 def save_json(path,obj):
@@ -60,11 +61,12 @@ def checkpoint_label(name,path):
 
 
 def load_model(root,name,cfg,checkpoint=None):
+    check_data_spec(root,cfg)
     path=Path(checkpoint) if checkpoint is not None else root/f'{name}.pt'
     ck=torch.load(path,map_location=device(cfg),weights_only=False)
     check_checkpoint_observations(ck,name)
     model_cfg=ck.get('config',cfg)
-    if checkpoint is not None and model_cfg['env']!=cfg['env']:
+    if model_cfg['env']!=cfg['env']:
         raise ValueError('Checkpoint environment differs from this run; evaluate with its matching run/config.json')
     model=Model(name,model_cfg['train'],model_cfg['env']['action_limit']).to(device(cfg))
     model.load_state_dict(ck['model']); model.eval()
@@ -101,10 +103,15 @@ def annotate(eps,model,cfg):
 
 def fit(root,kind,cfg,resume=False):
     cfg=copy.deepcopy(cfg)
+    if (root/'config.json').is_file():
+        check_environment(json.loads((root/'config.json').read_text()),cfg)
+    check_data_spec(root,cfg)
     tc=cfg['train']; dev=device(cfg)
     last=root/f'{kind}.last.pt'
     checkpoint=torch.load(last,map_location=dev,weights_only=False) if resume and last.exists() else None
-    if checkpoint: check_checkpoint_observations(checkpoint,kind)
+    if checkpoint:
+        check_checkpoint_observations(checkpoint,kind)
+        check_environment(cfg,checkpoint.get('config',cfg))
     source=load_model(root,'bc',cfg) if kind=='sft' else None
     saved_train=checkpoint.get('config',{}).get('train',{}) if checkpoint else {}
     tc.pop('policy_use_velocity',None)
@@ -119,6 +126,8 @@ def fit(root,kind,cfg,resume=False):
     if not isinstance(validation_interval,int) or isinstance(validation_interval,bool) or validation_interval<0:
         raise ValueError('validation_rollout_interval must be a nonnegative integer')
     tc['validation_rollout_interval']=validation_interval
+    if checkpoint:
+        check_resume(cfg,checkpoint.get('config',cfg),checkpoint.get('global_step',0))
     train=episodes(root,'train'); val=episodes(root,'validation')
     if kind!='bc':
         train+=episodes(root,'train','rollout'); val+=episodes(root,'validation','rollout')
@@ -126,6 +135,15 @@ def fit(root,kind,cfg,resume=False):
         train=[ep for ep in train if ep['success'][-1]]
         val=[ep for ep in val if ep['success'][-1]]
     if not train or not val: raise RuntimeError('Generate training and validation episodes first')
+    for ep in train+val:
+        action=np.asarray(ep['action'])
+        if action.ndim!=2 or action.shape[1]!=2 or not np.isfinite(action).all() or np.any(np.abs(action)>cfg['env']['action_limit']+1e-6):
+            raise ValueError('Trajectory action definition differs from this environment: expected two bounded joint offsets')
+        for key,expected in (('control_dt',cfg['env']['timestep']*cfg['env']['substeps']),
+                             ('physics_timestep',cfg['env']['timestep']),('success_distance',cfg['env']['success_distance']),
+                             ('goal_hold_required',cfg['env']['hold'])):
+            if key in ep and not np.allclose(ep[key],expected,rtol=0,atol=1e-8):
+                raise ValueError(f'Trajectory {key} differs from the frozen environment')
     threshold=tc['threshold']
     if kind=='recap':
         value=load_model(root,'value',cfg)
@@ -184,6 +202,8 @@ def fit(root,kind,cfg,resume=False):
     if step_mode:
         train_steps(root,kind,cfg,model,optimizer,(x,y,labels),(vx,vy,vl),loss,validation_scenes,policy,checkpoint)
         return
+    check_data_spec(root,cfg,create=True)
+    save_training_config(root,kind,cfg)
     tqdm.write(f'{kind} observation_dim={OBSERVATION_DIM}, validation_rollout_interval={validation_interval}')
     with tqdm(range(start,tc['epochs']),total=tc['epochs'],initial=start,
               desc=f'Train {kind}',unit='epoch',dynamic_ncols=True) as epochs:
@@ -287,15 +307,16 @@ def evaluate_policies(root,cfg,models=None,splits=None,checkpoint=None):
 
 def main():
     p=argparse.ArgumentParser(); p.add_argument('command',choices=['generate','train','rollout','evaluate','plot','all','migrate'])
-    p.add_argument('--config',help='Configuration file; evaluate defaults to the saved run config, other commands to configs/default.yaml')
+    p.add_argument('--config',help='Training/config overrides. Existing datasets keep their saved environment; '
+                   'fresh train uses default train settings, resume and other commands use the saved run settings.')
     p.add_argument('--run',default='runs/default')
     p.add_argument('--model',choices=['bc','sft','value','recap'],
                    help='Train this model or evaluate this policy. Defaults to bc for train and all policies for evaluate.')
     p.add_argument('--resume',action='store_true')
     p.add_argument('--checkpoint',help='For evaluate --model: checkpoint path, relative to the run or absolute; bare names also search run/checkpoints')
     p.add_argument('--output-run',help='Destination for migrate: a new run with 9D trajectory data and no old checkpoints.')
-    p.add_argument('--lr',type=float,help='Learning rate in the new run created by migrate.')
-    p.add_argument('--train-config',help='For migrate: merge the train section of this YAML into the new run configuration.')
+    p.add_argument('--lr',type=float,help='Learning-rate override for train or migrate.')
+    p.add_argument('--train-config',help='For train or migrate: override only the train section using this YAML.')
     p.add_argument('--splits',nargs='+',choices=(*DATASET_SPLITS,'goal_ood','composition_ood'),
                    help='Generate or evaluate only these datasets. Combine generate with --resume to skip completed datasets.')
     args=p.parse_args()
@@ -308,11 +329,29 @@ def main():
         overrides=yaml.safe_load(Path(args.train_config).read_text())['train'] if args.train_config else None
         migrate_run(args.run,args.output_run,lr=args.lr,train_overrides=overrides)
         return
-    if args.output_run or args.lr is not None or args.train_config:
-        p.error('--output-run, --lr, and --train-config are supported only by migrate')
+    if args.output_run or ((args.lr is not None or args.train_config) and args.command!='train'):
+        p.error('--output-run is for migrate; --lr/--train-config are for train or migrate')
+    if args.lr is not None and (not np.isfinite(args.lr) or args.lr<=0):
+        p.error('--lr must be finite and positive')
     root=Path(args.run)
-    config_path=Path(args.config) if args.config else root/'config.json' if args.command=='evaluate' and (root/'config.json').is_file() else Path('configs/default.yaml')
-    cfg=yaml.safe_load(config_path.read_text())
+    saved=json.loads((root/'config.json').read_text()) if (root/'config.json').is_file() else None
+    use_saved=saved is not None and (args.command not in ('train','all') or args.resume)
+    config_path=Path(args.config) if args.config else root/'config.json' if use_saved else Path('configs/default.yaml')
+    requested=yaml.safe_load(config_path.read_text())
+    previous=None
+    if args.command=='train' and args.resume:
+        last=root/f'{args.model or "bc"}.last.pt'
+        if not last.is_file(): raise FileNotFoundError(f'Resume checkpoint not found: {last}')
+        previous=torch.load(last,map_location='cpu',weights_only=False).get('config',saved)
+        if previous is not None and args.config is None: requested=copy.deepcopy(previous)
+    if args.train_config:
+        requested=copy.deepcopy(requested)
+        requested.setdefault('train',{}).update(yaml.safe_load(Path(args.train_config).read_text())['train'])
+    if args.lr is not None: requested.setdefault('train',{})['lr']=args.lr
+    explicit=args.config is not None or args.train_config is not None or args.lr is not None
+    cfg=resolve_config(saved,requested,args.command,explicit=explicit,checkpoint=previous,
+                       environment_explicit=args.config is not None)
+    check_data_spec(root,cfg)
     if args.command!='evaluate': root.mkdir(parents=True,exist_ok=True)
     if args.splits and args.command not in ('generate','evaluate','all'):
         p.error('--splits is supported by generate, evaluate, and all')
@@ -320,20 +359,23 @@ def main():
         p.error('evaluate --model requires a policy model such as bc, sft, or recap')
     random.seed(cfg['seed']); np.random.seed(cfg['seed']); torch.manual_seed(cfg['seed'])
     torch.use_deterministic_algorithms(True)
-    if (root/'config.json').exists() and json.loads((root/'config.json').read_text())!=cfg:
-        raise ValueError('Use a new run directory for changed configurations')
-    if args.command not in ('generate','all','evaluate'):
+    if saved is None and args.command not in ('generate','all','evaluate'):
         save_json(root/'config.json',cfg)
     def generate():
         generate_datasets(root,cfg,selected=args.splits,resume=args.resume)
     def collect():
+        from hashlib import sha256
         scenes=json.loads((root/'scenes.json').read_text()); env=ObstacleReach2D(cfg['env']); model=load_model(root,'bc',cfg)
+        digest=sha256((root/'bc.pt').read_bytes()).hexdigest()
+        checkpoint_step=getattr(model,'checkpoint_info',{}).get('step')
         try:
             for j,split in enumerate(['train','validation']):
                 count=cfg['data']['rollouts'] if split=='train' else len(scenes[split])
                 with tqdm(range(count),desc=f'Rollout {split}',unit='episode',dynamic_ncols=True) as progress:
                     for i in progress:
                         ep=rollout(env,scenes[split][i%len(scenes[split])],policy(model),cfg['seed']+10000000+j*100000+i,'bc',cfg['data']['exploration'])
+                        ep.update(policy_checkpoint_sha256=np.array(digest),
+                                  policy_checkpoint_step=np.array(checkpoint_step if checkpoint_step is not None else -1))
                         store(root,split,'rollout',ep)
         finally: env.close()
     def evaluate():

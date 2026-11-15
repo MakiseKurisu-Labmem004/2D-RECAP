@@ -183,11 +183,13 @@ def generate_datasets(root, cfg, selected=None, resume=False):
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
     with generation_lock(root):
+        from .configuration import dataset_settings,check_data_spec
         saved_config = read_json(root / 'config.json', None)
-        if saved_config is not None and saved_config != cfg:
+        if saved_config is not None and dataset_settings(saved_config) != dataset_settings(cfg):
             raise ValueError('Use the saved run configuration when resuming generation')
         if saved_config is None:
             write_json(root / 'config.json', cfg)
+        check_data_spec(root,cfg,create=True)
         return generate_locked(root, cfg, selected, resume)
 
 

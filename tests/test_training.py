@@ -35,6 +35,7 @@ def test_loading_uses_checkpoint_architecture(tmp_path, config):
     model = Model('bc', saved['train'], .05)
     torch.save(dict(model=model.state_dict(), config=saved), tmp_path / 'bc.pt')
     runtime = copy.deepcopy(config)
+    runtime['env'] = copy.deepcopy(saved['env'])
     runtime['train'].update(width=32)
     loaded = cli.load_model(tmp_path, 'bc', runtime)
     x = torch.randn(3, 9)

@@ -53,6 +53,7 @@ def train_steps(root, kind, cfg, model, optimizer, train, validation, loss, scen
     if checkpoint and validation_steps != saved_train.get('validation_steps', validation_steps):
         raise ValueError('Resume with the checkpoint validation_steps setting')
     tc.update(validation_steps=validation_steps, checkpoint_steps=checkpoint_steps)
+    from .configuration import check_data_spec,save_training_config
     x, y, labels = train
     vx, vy, vl = validation
     state = checkpoint.get('train_state') if checkpoint else None
@@ -69,6 +70,8 @@ def train_steps(root, kind, cfg, model, optimizer, train, validation, loss, scen
     best_success = checkpoint.get('best_success', -1.) if checkpoint else -1.
     if state and state['transitions'] != len(x):
         raise ValueError('Resume requires unchanged training data')
+    check_data_spec(root,cfg,create=True)
+    save_training_config(root,kind,cfg)
     snapshots = root / 'checkpoints'
     snapshots.mkdir(exist_ok=True)
     tqdm.write(f'{kind}: {budget} optimizer steps; {tc["optimizer"]}, lr={tc["lr"]}, '
