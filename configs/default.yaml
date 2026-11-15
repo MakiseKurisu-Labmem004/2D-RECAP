@@ -51,14 +51,14 @@ data:
   exploration: 0.005
 train:
   epochs: 80
-  max_steps: 8000
+  max_steps: 2000
   validation_steps: 500
   checkpoint_steps: 500
   batch_size: 256
   optimizer: adamw
   weight_decay: 0.0001
   lr: 0.001
-  goal_anchor_samples: 16
+  goal_anchor_samples: 64
   goal_anchor_radius: 0.12
   width: 128
   depth: 6

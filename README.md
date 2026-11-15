@@ -60,7 +60,7 @@ recap evaluate --model bc --run runs/seed42 --checkpoint bc.step00002000.pt --sp
 
 环境观测、保存的 `observation` / `next_observation` 和 BC、SFT、Value、RECAP 全部使用 **9D 观测**，彻底移除两维关节速度。RECAP 追加三维条件后网络输入为 12D。旧的 `train.policy_use_velocity` 设置已移除。MuJoCo 仍正常模拟物理速度与惯性，速度不暴露给模型或保存到观测中。由于相同姿态可能具有不同物理速度，9D 观测不再包含完整动力学状态，Value 预测也受此信息限制。
 
-默认训练使用 **AdamW、学习率 0.001、weight_decay=0.0001、8000 个优化器更新步**。`train.max_steps` 非空时优先于 `epochs`；一个 step 指一个 batch 的参数更新。默认每 `train.validation_steps: 500` 步验证一次，第 1 步和最后一步也验证。BC 对全部 validation 场景执行闭环评测，优先按成功率、成功率相同时按 validation MSE 保存 `bc.pt`；SFT、Value 和 RECAP 按各自 validation loss 选模。测试集合不参与选择。
+默认训练使用 **AdamW、学习率 0.001、weight_decay=0.0001、2000 个优化器更新步**。默认 BC 近目标监督样本数为 `goal_anchor_samples: 64`，采用下文 50 Hz、C³ 对照选出的配置。`train.max_steps` 为共享预算，SFT、Value 和 RECAP 也会使用 2000 步；本轮预算实验仅验证了 BC。`train.max_steps` 非空时优先于 `epochs`；一个 step 指一个 batch 的参数更新。默认每 `train.validation_steps: 500` 步验证一次，第 1 步和最后一步也验证。BC 对全部 validation 场景执行闭环评测，优先按成功率、成功率相同时按 validation MSE 保存 `bc.pt`；SFT、Value 和 RECAP 按各自 validation loss 选模。测试集合不参与选择。
 
 `train.checkpoint_steps: 500` 控制额外快照间隔，写入 `checkpoints/bc.step00000500.pt` 等文件；验证或快照时更新 `bc.last.pt`。快照包含优化器、随机状态和当前数据乱序位置，`--resume` 可从最近保存点精确续训。`bc.history.json` 保存 step、epoch、loss、验证成功率及各难度指标。将 `max_steps` 设为 `null` 或省略时仍使用 epoch 训练；此模式由 `validation_rollout_interval` 控制 BC 闭环验证间隔，默认 10 轮，设为 0 时仅按 MSE 选模。smoke 使用 2 轮训练。
 
@@ -101,7 +101,7 @@ python scripts/sweep_bc.py --run runs/seed42 --output runs/bc-sweep-10k --lrs 0.
 
 默认控制频率为 **50 Hz**：物理步长仍为 0.005 s，每 4 个物理步更新一次动作。动作目标偏移上限降为 ±0.04 rad。`env.control_interpolation: c3_filter` 使用四级连续滤波，在每个物理步精确推进控制目标，并保留跨控制周期的导数状态，构成 C³ 连续的理想控制信号；MuJoCo 以 200 Hz 采样执行。滤波每级时间常数 `control_filter_tau: 0.003` s，总低频延迟约 12 ms，专家与所有学习策略共用这一执行规则。实际运动的高阶导数还受采样、动作限幅和动力学影响。
 
-任务 horizon 与专家上限均为 **500 控制步（10 秒）**；成功保持 13 步约为 0.26 秒。TD horizon 调为 25 步，仍约为 0.5 秒。BC 的学习率 0.001、batch size 256、8000 个参数更新步保持不变。旧运行缺少插值字段时仍使用原 hold 模式；要使用新频率、动作范围和专家，需以新配置在新目录重新生成并训练。
+任务 horizon 与专家上限均为 **500 控制步（10 秒）**；成功保持 13 步约为 0.26 秒。TD horizon 调为 25 步，仍约为 0.5 秒。BC 默认学习率为 0.001、batch size 为 256，参数更新步数按本轮实验结果设为 2000。旧运行缺少插值字段时仍使用原 hold 模式；要使用新频率、动作范围和专家，需以新配置在新目录重新生成并训练。
 
 新生成时若专家实际经过另一个 IK 解到达目标，会安全截短原路径并重新执行，再按最终路径和实际间隙计算难度。原有 easy/medium/hard 配额仍执行。需要全新数据时，用新目录直接生成：
 
@@ -111,7 +111,7 @@ recap train --model bc --run runs/seed42-c3 --config runs/seed42-c3/config.json
 recap evaluate --model bc --run runs/seed42-c3 --config runs/seed42-c3/config.json
 ```
 
-BC 新增 `train.goal_anchor_samples: 16`：仅在 train 场景的安全 IK 解附近，以每关节 ±0.12 rad 扰动补充局部纠偏标签，同时加入精确目标处的零动作标签。所有样本都通过关节限位和直连避障检查；它们只参与 BC 动作监督，不伪造 episode、回报或 Value 标签。设为 0 可关闭。验证/测试不添加控制器，仍直接使用策略输出。`bc.goal_anchors.json` 记录补充样本数量。
+BC 默认使用 `train.goal_anchor_samples: 64`：仅在 train 场景的安全 IK 解附近，以每关节 ±0.12 rad 扰动补充局部纠偏标签，同时加入精确目标处的零动作标签。所有样本都通过关节限位和直连避障检查；它们只参与 BC 动作监督，不伪造 episode、回报或 Value 标签。设为 0 可关闭。验证/测试不添加控制器，仍直接使用策略输出。`bc.goal_anchors.json` 记录补充样本数量。
 
 默认成功距离从 0.03 m 放宽到 **0.035 m**，连续保持 13 步，成功结束不要求末端精确重合目标中心。评测另外报告 `strict_success_rate`（已记录轨迹中按 3 cm 连续保持同样步数的成功率）和 `tolerance_only_success_count`（仅因放宽范围而通过的数量）；前者不等于在旧判定下重新执行一次策略。`near_goal_stall_count` 独立统计范围外的静止超时：最终距离在成功阈值外两倍阈值内，且最后 20 帧相邻关节位移均小于 1e-5 rad。
 
@@ -131,7 +131,7 @@ BC 新增 `train.goal_anchor_samples: 16`：仅在 train 场景的安全 IK 解�
 
 | 学习率 | 网络（隐藏层×宽度） | goal_anchor_samples | 最佳步数 | validation |
 |---|---|---:|---:|---:|
-| 0.001 | 6×128 | 16（默认） | 2000 | 21/30，70.0% |
+| 0.001 | 6×128 | 16（原默认） | 2000 | 21/30，70.0% |
 | 0.0005 | 6×128 | 16 | 5000 | 22/30，73.3% |
 | 0.0003 | 6×128 | 16 | 7000 | 20/30，66.7% |
 | 0.001 | 3×128 | 16 | 4500 | 19/30，63.3% |
@@ -154,7 +154,7 @@ BC 新增 `train.goal_anchor_samples: 16`：仅在 train 场景的安全 IK 解�
 
 推荐配置三个种子的测试总体为 44.0%、45.0%、42.3%，均值 43.8%、样本标准差 1.3 个百分点；这是相同 300 个场景的三次训练种子复验。提升仍主要来自 easy，三个种子合计 medium 为 12/180、hard 为 3/90 次成功，不能据此称为已解决困难绕障或 OOD 泛化。近目标静止超时仍存在：seed42 默认配置为 10/300 次，推荐配置为 17/300 次；本轮按整体成功率选择，没有将停滞指标作为优化目标。
 
-可复用配置见 [configs/bc_best.yaml](configs/bc_best.yaml)：AdamW、lr=0.001、weight decay=1e-4、batch size=256、6×128、goal_anchor_samples=64、max_steps=2000、每 500 步验证。已额外从头训练 2000 步，逐参数核对与本轮 seed42 最佳 checkpoint 完全一致。该预设用于 BC；其余模型需要各自选择训练预算。当前默认配置文件保留既有设置。
+可复用配置见 [configs/bc_best.yaml](configs/bc_best.yaml)：AdamW、lr=0.001、weight decay=1e-4、batch size=256、6×128、goal_anchor_samples=64、max_steps=2000、每 500 步验证。已额外从头训练 2000 步，逐参数核对与本轮 seed42 最佳 checkpoint 完全一致。该预设用于 BC；其余模型需要各自选择训练预算。`configs/default.yaml` 已对齐此配置；其中 `train.max_steps` 是所有模型共享的预算。
 
 ```bash
 # 复用已生成的当前数据，在独立目录训练推荐 BC
