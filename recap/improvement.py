@@ -71,16 +71,11 @@ def select_scene_pool(manifest, splits, scene_ids=None):
     return scenes,{name:count for name,count in counts.items() if count}
 
 
-def regression_gate(previous, candidate, validation_previous, validation_candidate, max_regressions=0):
+def regression_changes(previous, candidate, validation_previous, validation_candidate):
     regressions = [key for key in previous if previous[key] and not candidate[key]]
     validation_regressions = [key for key in validation_previous if validation_previous[key] and not validation_candidate[key]]
     recovered = [key for key in previous if not previous[key] and candidate[key]]
-    improved = bool(recovered) or sum(validation_candidate.values())>sum(validation_previous.values())
-    accept = (improved and len(regressions)+len(validation_regressions)<=max_regressions
-              and sum(candidate.values())>=sum(previous.values())
-              and sum(validation_candidate.values())>=sum(validation_previous.values()))
-    return dict(accepted=accept, recovered=recovered, regressions=regressions,
-                validation_regressions=validation_regressions)
+    return dict(recovered=recovered, regressions=regressions,validation_regressions=validation_regressions)
 
 
 def takeover_episode(scene, failed, cfg, seed, lookback):
@@ -160,15 +155,81 @@ def correction_value_episode(ep,cfg):
     return result
 
 
-def evaluate_scenes(model, scenes, cfg, seed, description):
-    from .cli import policy
+def evaluate_scenes(model, scenes, cfg, seed, description,*,record_root=None,record_source='practice',value=None):
+    from .cli import policy,annotate,store
     if not scenes: return dict(metrics=None, successes={})
     env = ObstacleReach2D(cfg['env'])
     try:
         episodes = [rollout(env, scene, policy(model), seed+i, 'regression')
                     for i, scene in enumerate(tqdm(scenes, desc=description, unit='episode', dynamic_ncols=True))]
     finally: env.close()
+    if value is not None:
+        annotate(episodes,value,cfg)
+    value_info=getattr(value,'checkpoint_info',{}) if value is not None else {}
+    value_digest=sha256(Path(value_info['path']).read_bytes()).hexdigest() if value_info.get('path') else ''
+    policy_info=getattr(model,'checkpoint_info',{})
+    policy_digest=sha256(Path(policy_info['path']).read_bytes()).hexdigest() if record_root is not None and policy_info.get('path') else ''
+    if record_root is not None:
+        for ep in episodes:
+            if 'td_advantage' in ep:
+                ep['advantage_indicator']=ep['td_advantage']>cfg['train']['threshold']
+                ep.update(value_checkpoint_sha256=np.array(value_digest),
+                          advantage_threshold=np.array(cfg['train']['threshold']),n_step=np.array(cfg['train']['n_step']),
+                          return_scale=np.array(cfg['env']['horizon']+149))
+            ep['value_alignment']=np.array('observation_before_action')
+            ep.update(policy_checkpoint_sha256=np.array(policy_digest),policy_checkpoint_step=np.array(policy_info.get('step') or -1))
+            store(record_root,'evaluation',record_source,ep)
     return dict(metrics=episode_metrics(episodes), successes={s['scene_id']: bool(e['success'][-1]) for s,e in zip(scenes,episodes)})
+
+
+def record_annotations(root, episodes, origins, cfg, round_index):
+    """Compact per-round labels for the cumulative replay, linked to raw NPZs."""
+    root=Path(root)
+    critic=root/'value.pt'
+    digest=sha256(critic.read_bytes()).hexdigest()
+    diagnostics=json.loads((root/'diagnostics.json').read_text()) if (root/'diagnostics.json').is_file() else {}
+    threshold=diagnostics.get('threshold',cfg['train']['threshold'])
+    rows=[]
+    for ep in episodes:
+        identifier=str(ep['episode_id'])
+        origin=Path(origins[identifier])
+        if not origin.is_file(): raise FileNotFoundError(f'Raw trajectory missing: {origin}')
+        kind='corrections' if np.asarray(ep.get('intervention_mask',False)).any() else 'rollout'
+        directory=root/'data/adaptation/annotations'/kind
+        directory.mkdir(parents=True,exist_ok=True)
+        fields={key:np.asarray(ep[key]) for key in ('value_prediction','mc_return','td_advantage','advantage_indicator')}
+        length=len(ep['action'])
+        if any(array.shape!=(length,) for array in fields.values()):
+            raise ValueError('Trajectory annotations must align one-to-one with actions')
+        fields.update(episode_id=ep['episode_id'],scene_id=ep['scene_id'],frame_index=np.arange(length),
+                      intervention_mask=np.asarray(ep.get('intervention_mask',np.zeros(length,dtype=bool))),
+                      trajectory_path=np.array(Path(os.path.relpath(origin,directory)).as_posix()),
+                      value_checkpoint=np.array(Path(os.path.relpath(critic,directory)).as_posix()),
+                      value_checkpoint_sha256=np.array(digest),annotation_round=np.array(round_index),
+                      advantage_threshold=np.array(threshold),n_step=np.array(cfg['train']['n_step']),
+                      return_scale=np.array(cfg['env']['horizon']+149),
+                      value_alignment=np.array('observation_before_action'))
+        offset=int(ep.get('control_step_offset',0))
+        fields.update(control_step_offset=np.array(offset),task_step_index=np.arange(length)+offset,
+                      within_task_horizon=np.arange(length)+offset<cfg['env']['horizon'],
+                      value_supervision_steps=np.array(min(length,max(0,cfg['env']['horizon']-offset))),
+                      mc_return_definition=np.array('full_recorded_segment_return'))
+        # Enrich only this round's newly collected NPZs. Older raw trajectories
+        # keep their original round's labels; sidecars retain all later relabels.
+        if origin.resolve().is_relative_to(root.resolve()):
+            from .cli import store
+            enriched=dict(ep)
+            for key in ('value_checkpoint_sha256','annotation_round','advantage_threshold','n_step',
+                        'return_scale','value_alignment','value_supervision_steps','within_task_horizon'):
+                enriched[key]=fields[key]
+            store(root,'adaptation',kind,enriched)
+        destination=directory/f'{identifier}.npz'
+        np.savez_compressed(destination,**fields)
+        rows.append(dict(episode_id=identifier,scene_id=str(ep['scene_id']),frames=length,
+                         trajectory=str(origin.relative_to(root.parent)),annotations=str(destination.relative_to(root))))
+    write_json(root/'annotations.json',dict(round=round_index,value_checkpoint_sha256=digest,
+               alignment='index t corresponds to observation[t] and action[t]; raw qpos[t] is after that action',
+               trajectories=rows))
 
 
 def collect(model, scenes, cfg, count, seed, root):
@@ -224,6 +285,7 @@ def run_experiment(source, output, modes, splits, options):
     protocol = dict(config=cfg, modes=modes, options=vars(options), initial_bc_sha256=baseline_hash,
                     evaluation_protocol='pooled_practice' if not holdout else 'practice_with_holdout',
                     scene_sampling='uniform_with_replacement',
+                    policy_update='always_use_latest_round',
                     scene_pool_sources=pool_sources,scene_pool_size=len(target),
                     practice_scene_ids=[s['scene_id'] for s in adapt],
                     adaptation_scene_ids=[s['scene_id'] for s in adapt],
@@ -242,12 +304,12 @@ def run_experiment(source, output, modes, splits, options):
         active, active_value, active_path = baseline, None, str(initial_checkpoint)
         active_kind='bc'
         previous, previous_validation = initial, validation
-        experience, corrections, value_corrections = [], [], []
+        experience, corrections, value_corrections, origins = [], [], [], {}
         history = []
         arm = output/mode; arm.mkdir()
         for round_index in range(1,options.rounds+1):
             # Identical seeds/initial weights/data for both arms. Later behavior
-            # can differ because their accepted policies and failure sets differ.
+            # can differ as their learned policies evolve.
             seed = options.seed+round_index*1000000
             random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
             root = arm/f'round-{round_index:03d}'; root.mkdir()
@@ -257,6 +319,8 @@ def run_experiment(source, output, modes, splits, options):
                        includes_original_training_data=True,source_validation_is_training_holdout=True))
             episodes, failures = collect(active,adapt,cfg,options.episodes,seed,root)
             experience.extend(episodes)
+            for ep in episodes:
+                origins[str(ep['episode_id'])]=root/'data/adaptation/rollout'/f"{ep['episode_id']}.npz"
             budget = dict(autonomous_episodes=len(episodes),autonomous_steps=sum(len(e['action']) for e in episodes),
                           expert_steps=0,replay_steps=0,expert_attempts=0,correction_episodes=0,policy_suffix_steps=0,
                           expert_labeled_steps=0,assisted_successes=0,expert_recovery_successes=0)
@@ -277,27 +341,31 @@ def run_experiment(source, output, modes, splits, options):
                         corrections.append(ep); budget['correction_episodes']+=1
                         value_corrections.append(correction_value_episode(ep,cfg))
                         store(root,'adaptation','corrections',ep)
+                        origins[str(ep['episode_id'])]=root/'data/adaptation/corrections'/f"{ep['episode_id']}.npz"
             extras = experience+corrections
             fit(root,'value',cfg,expert_root=source,extra_train=experience+value_corrections,initial_value=active_value,persist_annotations=False)
             fit(root,'recap',cfg,expert_root=source,extra_train=extras,initial_policy=active,persist_annotations=False)
+            record_annotations(root,extras,origins,cfg,round_index)
+            metric_cfg=copy.deepcopy(cfg)
+            metric_cfg['train']['threshold']=json.loads((root/'diagnostics.json').read_text())['threshold'] if (root/'diagnostics.json').is_file() else cfg['train']['threshold']
             candidate=load_model(root,'recap',cfg,checkpoint=root/'recap.last.pt')
-            assessment=evaluate_scenes(candidate,adapt,cfg,options.seed+80000000,'Practice failure/success regression')
-            val=evaluate_scenes(candidate,manifest['validation'],cfg,options.seed+81000000,'Source validation regression')
-            gate=regression_gate(previous['successes'],assessment['successes'],previous_validation['successes'],
-                                 val['successes'],options.max_regressions)
-            result=dict(round=round_index,mode=mode,budget=budget,interventions=interventions,gate=gate,
+            active=candidate;active_value=load_model(root,'value',cfg);active_path=str(root/'recap.last.pt')
+            active_kind='recap'
+            assessment=evaluate_scenes(candidate,adapt,metric_cfg,options.seed+80000000,'Practice metrics (report only)',
+                        record_root=root,record_source='practice',value=active_value)
+            val=evaluate_scenes(candidate,manifest['validation'],metric_cfg,options.seed+81000000,'Source validation metrics (report only)',
+                        record_root=root,record_source='validation',value=active_value)
+            changes=regression_changes(previous['successes'],assessment['successes'],previous_validation['successes'],val['successes'])
+            result=dict(round=round_index,mode=mode,budget=budget,interventions=interventions,policy_updated=True,changes=changes,
                         candidate_adaptation=assessment,candidate_validation=val,
                         cumulative_autonomous_episodes=len(experience),cumulative_correction_episodes=len(corrections),
                         original_training_data_included=True)
-            if gate['accepted']:
-                active=candidate;active_value=load_model(root,'value',cfg);active_path=str(root/'recap.last.pt')
-                active_kind='recap'
-                previous,previous_validation=assessment,val
+            previous,previous_validation=assessment,val
             result['active_policy']=active_path
             result['active_policy_kind']=active_kind
             result['active_adaptation']=previous
             history.append(result);write_json(root/'result.json',result);write_json(arm/'history.json',history)
-            print(f"{mode} round {round_index}: accepted={gate['accepted']}; recovered={len(gate['recovered'])}; regressions={len(gate['regressions'])}",flush=True)
+            print(f"{mode} round {round_index}: policy updated; recovered={len(changes['recovered'])}; regressions={len(changes['regressions'])}",flush=True)
         final_holdout=evaluate_scenes(active,holdout,cfg,options.seed+82000000,'Final target holdout (report only)')
         summaries[mode]=dict(active_policy=active_path,active_policy_kind=active_kind,adaptation=previous,holdout=final_holdout,rounds=history)
         write_json(arm/'summary.json',summaries[mode])
@@ -325,12 +393,11 @@ def main(argv=None):
     p.add_argument('--expert-episodes',type=int,default=10)
     p.add_argument('--lookback',type=int,default=25)
     p.add_argument('--correction-weight',type=float,default=5.)
-    p.add_argument('--max-regressions',type=int,default=0)
     p.add_argument('--train-config')
     args=p.parse_args(argv)
     if min(args.rounds,args.episodes,args.steps,args.threads,args.lookback)<=0:
         p.error('rounds, episodes, steps, threads and lookback must be positive')
-    if min(args.expert_episodes,args.max_regressions)<0: p.error('budgets must be nonnegative')
+    if args.expert_episodes<0: p.error('expert-episodes must be nonnegative')
     if not 0<=args.holdout_fraction<1: p.error('holdout-fraction must be in [0,1)')
     if not all(np.isfinite(x) for x in (args.lr,args.noise,args.correction_weight)) or args.lr<=0 or args.noise<0 or args.correction_weight<1:
         p.error('invalid learning rate, noise or replay weights')

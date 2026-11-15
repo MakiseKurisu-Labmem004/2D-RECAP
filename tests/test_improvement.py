@@ -70,12 +70,12 @@ def test_default_command_pools_all_scenes_without_holdout(tmp_path,monkeypatch):
     assert splits==['all'] and options.holdout_fraction==0
 
 
-def test_regression_gate_protects_previous_successes_and_source_validation():
+def test_regression_changes_only_reports_metrics():
     before=dict(a=True,b=False)
-    good=improve.regression_gate(before,dict(a=True,b=True),dict(v=True),dict(v=True))
-    assert good['accepted'] and good['recovered']==['b']
-    assert not improve.regression_gate(before,dict(a=False,b=True),dict(v=True),dict(v=True))['accepted']
-    assert not improve.regression_gate(before,dict(a=True,b=True),dict(v=True),dict(v=False))['accepted']
+    good=improve.regression_changes(before,dict(a=True,b=True),dict(v=True),dict(v=True))
+    assert good['recovered']==['b'] and 'accepted' not in good
+    bad=improve.regression_changes(before,dict(a=False,b=True),dict(v=True),dict(v=False))
+    assert bad['regressions']==['a'] and bad['validation_regressions']==['v']
 
 
 def test_takeover_preserves_physics_and_continues_until_success_beyond_deadline(cfg,monkeypatch):
@@ -121,8 +121,8 @@ def test_pair_keeps_original_data_and_limits_extra_expert_labels(tmp_path,cfg,mo
     baseline=SimpleNamespace(name='baseline')
     candidate=SimpleNamespace(name='candidate')
     monkeypatch.setattr(cli,'load_model',lambda root,kind,cfg,checkpoint=None:baseline if root==source else candidate)
-    def evaluate(model,scenes,cfg,seed,description):
-        return dict(metrics={},successes={s['scene_id']:s['scene_id']=='validation' or model.name=='candidate' for s in scenes})
+    def evaluate(model,scenes,cfg,seed,description,**kwargs):
+        return dict(metrics={},successes={s['scene_id']:model.name=='baseline' for s in scenes})
     monkeypatch.setattr(improve,'evaluate_scenes',evaluate)
     def episode(scene,seed):
         return dict(observation=np.zeros((2,9)),action=np.zeros((2,2)),reward=-np.ones(2),
@@ -132,20 +132,26 @@ def test_pair_keeps_original_data_and_limits_extra_expert_labels(tmp_path,cfg,mo
     def collect(model,scenes,cfg,count,seed,root):
         collected.append([s['scene_id'] for s in scenes])
         pairs=[(scenes[i%len(scenes)],episode(scenes[i%len(scenes)],seed+i)) for i in range(count)]
+        for _,ep in pairs:cli.store(root,'adaptation','rollout',ep)
         return [ep for _,ep in pairs],pairs
     monkeypatch.setattr(improve,'collect',collect)
     def takeover(scene,failed,cfg,seed,lookback):
         ep=episode(scene,seed)
-        ep.update(action=np.zeros((3,2)),intervention_mask=np.ones(3,dtype=bool),
+        ep.update(observation=np.zeros((3,9)),reward=-np.ones(3),distance=np.ones(3),action=np.zeros((3,2)),intervention_mask=np.ones(3,dtype=bool),
                   success=np.array([False,False,True]),task_success=np.array(True),takeover_step=np.array(1))
         return ep,dict(status='collected',expert_steps=3,replay_steps=1,policy_suffix_steps=0,success=True,task_success=True)
     monkeypatch.setattr(improve,'takeover_episode',takeover)
     def fit(root,kind,cfg,**kwargs):
         calls.append((root.parent.name,kind,kwargs['expert_root'],copy.deepcopy(kwargs['extra_train'])))
+        if kind=='value':(root/'value.pt').write_bytes(b'critic snapshot')
+        if kind=='recap':
+            for ep in kwargs['extra_train']:
+                n=len(ep['action'])
+                ep.update(value_prediction=np.zeros(n),mc_return=-np.ones(n),td_advantage=-np.ones(n),
+                          advantage_indicator=ep['intervention_mask'].copy())
     monkeypatch.setattr(cli,'fit',fit)
     args=SimpleNamespace(device='cpu',seed=42,noise=0.,steps=2,lr=.0001,correction_weight=5.,train_config=None,
-                         scene_ids=None,holdout_fraction=fraction,rounds=1,episodes=4,expert_episodes=3,
-                         lookback=2,max_regressions=0)
+                         scene_ids=None,holdout_fraction=fraction,rounds=2,episodes=4,expert_episodes=3,lookback=2)
     output=source/'improvement'/'test'
     result=improve.run_experiment(source,output,['autonomous','corrections'],splits,args)
     protocol=json.loads((output/'protocol.json').read_text())
@@ -164,6 +170,23 @@ def test_pair_keeps_original_data_and_limits_extra_expert_labels(tmp_path,cfg,mo
     assert budget['expert_recovery_successes']==3 and budget['assisted_successes']==3
     assert result['autonomous']['rounds'][0]['budget']['expert_steps']==0
     assert result['autonomous']['rounds'][0]['budget']['autonomous_episodes']==budget['autonomous_episodes']==4
+    for arm in result.values():
+        assert arm['rounds'][0]['changes']['regressions']
+        assert all(r['policy_updated'] and 'gate' not in r for r in arm['rounds'])
+        assert arm['active_policy_kind']=='recap' and 'round-002' in arm['active_policy']
+    annotations=output/'corrections/round-002/annotations.json'
+    index=json.loads(annotations.read_text())
+    assert len(index['trajectories'])==14
+    for row in index['trajectories']:
+        sidecar=annotations.parent/row['annotations']
+        with np.load(sidecar,allow_pickle=False) as recorded:
+            assert len(recorded['td_advantage'])==row['frames']
+            assert (sidecar.parent/str(recorded['trajectory_path'])).resolve().is_file()
+            raw_path=(sidecar.parent/str(recorded['trajectory_path'])).resolve()
+            with np.load(raw_path,allow_pickle=False) as raw:
+                assert len(raw['td_advantage'])==row['frames']
+                expected_round=1 if 'round-001' in str(raw_path) else 2
+                assert int(raw['annotation_round'])==expected_round
     for p,content in before.items():assert p.read_bytes()==content
 
 
@@ -258,3 +281,20 @@ def test_stationary_expert_failure_is_not_recorded_as_success(cfg,monkeypatch):
     monkeypatch.setattr(improve,'make_expert',lambda *args:Stalled())
     ep,result=improve.takeover_episode(scene,failed,cfg,123,3)
     assert ep is None and result['status']=='expert_stalled'
+
+
+def test_round_evaluation_saves_trajectory_with_frame_aligned_advantage(tmp_path,cfg):
+    cfg['env'].update(horizon=1,hold=2)
+    scene=dict(q0=[-.6,1.],goal=points([-.6,1.])[-1].tolist(),obstacle=[-.7,.4],radius=.05,scene_id='x')
+    model=Model('bc',cfg['train'],cfg['env']['action_limit'])
+    value=Model('value',cfg['train'],cfg['env']['action_limit'])
+    with torch.no_grad():
+        for parameter in model.parameters():parameter.zero_()
+    improve.evaluate_scenes(model,[scene],cfg,42,'test',record_root=tmp_path,value=value)
+    files=list((tmp_path/'data/evaluation/practice').glob('*.npz'))
+    assert len(files)==1
+    with np.load(files[0],allow_pickle=False) as ep:
+        assert len(ep['action'])==len(ep['td_advantage'])==len(ep['value_prediction'])==1
+        assert ep['value_alignment'].item()=='observation_before_action'
+        assert ep['mc_return'][0]==-1
+        np.testing.assert_allclose(ep['td_advantage'],-1-ep['value_prediction'],atol=1e-7)

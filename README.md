@@ -212,7 +212,7 @@ recap improve --run runs/seed42 --mode autonomous --experiment autonomous-v1
 recap improve --run runs/seed42 --mode corrections --experiment corrections-v1
 ```
 
-`--steps 1000` 表示每轮 Value 和 RECAP 分别执行 1000 次优化器更新。每组从同一个 BC 初始化；RECAP 的均值分支复制 BC 权重，新增条件输入初始为零，避免随机重建一个已经表现不错的策略。后续轮次从已接受的策略继续微调，Value 也随其更新。每轮的原训练数据与累积新经验共同参与优化，保留成功经验以减少遗忘。自主采样在统一实践池中均匀、有放回随机抽取，每个场景概率相同，与历史成功或失败无关。同一轮两组使用相同 seed 和场景抽样序列。专家接管组仍只从本轮实际采到的失败轨迹中提供有限纠正。
+`--steps 1000` 表示每轮 Value 和 RECAP 分别执行 1000 次优化器更新。每组从同一个 BC 初始化；RECAP 的均值分支复制 BC 权重，新增条件输入初始为零，避免随机重建一个已经表现不错的策略。后续轮次从上一轮训练后的策略继续微调，Value 也随其更新。每轮的原训练数据与累积新经验共同参与优化，保留成功经验以减少遗忘。自主采样在统一实践池中均匀、有放回随机抽取，每个场景概率相同，与历史成功或失败无关。同一轮两组使用相同 seed 和场景抽样序列。专家接管组仍只从本轮实际采到的失败轨迹中提供有限纠正。
 
 接管组先完成与自主组相同预算的均匀随机采集，再从实际失败记录中选择至多 `--expert-episodes 10` 次接管。默认回放到 `max(0,失败轨迹长度-25)`，重放真实动作恢复当时的物理和滤波状态。随后由规划专家持续控制直到满足成功距离和保持步数要求，不再交还策略，也不设单次或每轮专家执行步数上限。`--lookback` 可调整接管起点。若无法规划、发生碰撞/约束失败，或专家参考结束后仍在目标外静止，则记录接管失败；不会把失败数据当作成功纠正。
 
@@ -222,7 +222,11 @@ recap improve --run runs/seed42 --mode corrections --experiment corrections-v1
 
 默认 `--splits all --holdout-fraction 0`：合并所有非 validation 的现有场景，一起采集 Rollout、混合原训练集进行训练，不重新生成几何场景。默认数据规模下为 train 200 + 六类各 50，共 500 个实践场景；30 个 validation 场景仅作监控。`--episodes 200` 表示从统一池均匀有放回采样 200 次，不保证每个场景每轮都采到；回归检查覆盖整个实践池。原 ID/OOD 标签仅记录数据来源，池内不按这些标签分别训练。结果表示已练习场景上的改进。若另需独立泛化检查，可显式设置 `--holdout-fraction 0.2`；`--splits id` 或 `--scene-ids id-2000042-22` 仍可用于限定调试范围。原 `scenes.json` 和专家文件不修改；共同监督数据仍按两组约定使用原训练集，其他来源只提供实践场景，并不整批加入其专家答案。
 
-每轮对无专家辅助的候选策略检查目标适应场景，以及原 validation 场景。默认 `--max-regressions 0`：原本成功的场景不能变失败，总成功数不能降低，且至少修复一个目标失败或改善原 validation 成功数，才替换当前策略；否则保留上一策略。显式启用 holdout 时，仅在开始和最后报告，不参与接受判断；默认其为空。这个门槛检查的是有限场景上的确定性回归，不保证未来永不失败。
+每轮训练结束后，直接使用本轮完整训练预算后的 `recap.last.pt` 作为下一轮策略，不设成功率接受门槛，也不根据退步回退策略。无专家辅助的实践池和原 validation 评测仅记录指标、修复及退步场景。Value 仍按验证 loss 选择本轮 `value.pt`。显式启用 holdout 时，仅在开始和最后报告；默认其为空。
+
+每轮原始自主轨迹保存在 `data/adaptation/rollout/`，完整专家接管段保存在 `data/adaptation/corrections/`。这两类本轮新生成的 NPZ 在训练后也会写入当前轮的 Value、Return、Advantage、标签及 Value 模型哈希，直接读取即可查看；旧轮次原文件保留其当时的标注。RECAP 计算 Advantage 后，为截至该轮的全部新增轨迹保存紧凑标注到 `data/adaptation/annotations/rollout/` 和 `annotations/corrections/`；`annotations.json` 索引将标注关联到首次采集的原始 NPZ，避免逐轮复制整份旧轨迹。每个标注文件包含 `value_prediction`、`mc_return`、`td_advantage`、`advantage_indicator`、`intervention_mask`、帧索引、原始轨迹相对路径、当前 Value checkpoint 哈希、n_step、阈值和回报缩放。不同轮次会为同一条历史轨迹保存不同 Value 下的标注。
+
+Value/Advantage 的索引 t 对应动作前 `observation[t]` 及 `action[t]`；原轨迹 `qpos[t]` 是执行该动作后的姿态，元数据 `value_alignment` 明确标记这一对齐方式。原始专家数据继续共享，固定高优势规则记录在训练诊断中。每轮无辅助评测 NPZ 另存到 `data/evaluation/practice/` 与 `data/evaluation/validation/`，其中直接包含逐帧 Value、Return、Advantage 和标签；评测只用于记录，不影响下一轮策略选择。显式 `recap evaluate --checkpoint ...` 的只报告、不保存行为保持不变。
 
 结果保存在原目录的独立子树，原 BC 权重、专家数据和普通训练产物不覆盖：
 
@@ -243,7 +247,7 @@ runs/seed42/improvement/pooled-v1/
             └── corrections/  # 接管起至专家成功的完整片段，intervention_mask 全为真
 ```
 
-各组 `summary.json` 的 `active_policy` 与 `active_policy_kind` 指向最后通过回归门槛的策略，可能仍是固定保存的初始 BC 快照。候选策略为本轮完整训练预算后的 `recap.last.pt`；Value 按验证 loss 选模。实验名称已存在时会拒绝覆盖，另取 `--experiment` 名称可重新对照。`--train-config` 可覆盖其他训练字段，但网络须与初始 BC 一致，步数、学习率和纠正权重以 improve 的命令行参数为准。这些默认值是实验预算，尚未构成长训练成功率保证。
+各组 `summary.json` 的 `active_policy` 与 `active_policy_kind` 指向最后一轮的 `recap.last.pt`，每轮都更新，不执行策略接受/拒绝。Value 按验证 loss 选模。实验名称已存在时会拒绝覆盖，另取 `--experiment` 名称可重新对照。`--train-config` 可覆盖其他训练字段，但网络须与初始 BC 一致，步数、学习率和纠正权重以 improve 的命令行参数为准。这些默认值是实验预算，尚未构成长训练成功率保证。
 
 ## 模块与数据
 
