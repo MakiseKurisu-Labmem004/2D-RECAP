@@ -1,0 +1,3 @@
+extends: recap.yaml
+run: {name: success_bc}
+recap: {method: success_bc}

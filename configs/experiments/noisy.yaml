@@ -1,0 +1,4 @@
+extends: recap.yaml
+run: {name: noisy}
+policy_rollout:
+  exploration: {mode: gaussian, std: [0.08, 0.08, 0.04]}

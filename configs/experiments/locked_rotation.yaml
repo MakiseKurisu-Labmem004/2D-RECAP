@@ -1,0 +1,3 @@
+extends: recap.yaml
+run: {name: locked_rotation}
+environment: {lock_rotation: true}

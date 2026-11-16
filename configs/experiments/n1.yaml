@@ -1,0 +1,3 @@
+extends: recap.yaml
+run: {name: n1}
+recap: {n_step: 1}

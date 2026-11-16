@@ -1,0 +1,3 @@
+extends: recap.yaml
+run: {name: hard_bins}
+model: {soft_bins: false}

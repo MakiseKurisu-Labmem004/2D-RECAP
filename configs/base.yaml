@@ -1,0 +1,103 @@
+run:
+  stages: [physics, expert, freeze, bc, rollout, value, label, update, next_rollout, evaluate, diagnose]
+  output: runs
+  name: minimal
+environment:
+  gravity: [0, 0, -9.81]
+  block_size: 0.04
+  block_mass: 0.06
+  lock_rotation: false
+  max_opening: 0.08
+  finger_length: 0.06
+  finger_thickness: 0.008
+  friction: 1.5
+  wall_width: 0.04
+  wall_height: [0.06, 0.10]
+  workspace_x: [-0.30, 0.30]
+  max_height: 0.35
+  timestep: 0.0025
+  control_hz: 20
+  max_delta: 0.01
+  servo_kp: 1500
+  servo_kv: 70
+  servo_force: 80
+  grip_kp: 500
+  grip_force: 12
+  target_half_width: 0.045
+  success_speed: 0.025
+  success_angular_speed: 0.3
+  success_hold_steps: 6
+  layout: [near_near, near_far, far_near]
+  near: [0.12, 0.16]
+  far: [0.20, 0.24]
+observation:
+  features: [gripper, object, goal, wall, relative]
+  normalize: true
+reward:
+  gamma: 1.0
+  step: -1
+  success: 0
+  failure_cost: auto
+  version: v1
+  support: auto
+model:
+  device: cpu
+  hidden_layers: 6
+  hidden_units: 128
+  activation: relu
+  value_bins: 201
+  soft_bins: true
+expert_rollout:
+  successes: 100
+  max_control_steps: null
+  max_attempts: 10000
+  close_steps: 12
+  lift_probe: 0.035
+  clearance: 0.015
+policy_rollout:
+  episodes: 200
+  max_control_steps: 200
+  exploration: {mode: none, std: [0.08, 0.08, 0.04]}
+dataset:
+  version: v1
+  validation_fraction: 0.15
+  mixing: all_rounds
+bc_training:
+  epochs: 40
+  batch_size: 256
+  updates_per_epoch: 50
+  lr: 0.0003
+  validation_episodes: 20
+  validation_every: 5
+value_training:
+  epochs: 40
+  batch_size: 256
+  updates_per_epoch: 50
+  lr: 0.0003
+recap:
+  method: conditioned
+  n_step: 10
+  threshold: 0.0
+  condition_weight: 1.0
+  expert_ratio: 0.25
+  epochs: 40
+  batch_size: 256
+  updates_per_epoch: 50
+  lr: 0.0003
+  rounds: 1
+evaluation:
+  episodes: 100
+  max_control_steps: 200
+  exploration: {mode: none, std: [0, 0, 0]}
+  suites: [id, combination, height_1, height_2]
+  pool_size: 10
+  diagnostic_offsets: [-0.04, -0.02, 0, 0.02, 0.04]
+  diagnostic_repeats: 1
+  diagnostic_prefix_steps: 10
+seeds:
+  training: 1
+  expert: 10000
+  rollout: 100000
+  validation: 200000
+  evaluation: 300000
+  diagnostics: 400000

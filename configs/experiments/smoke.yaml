@@ -1,0 +1,8 @@
+extends: ../base.yaml
+run: {name: smoke}
+expert_rollout: {successes: 6, max_attempts: 50}
+policy_rollout: {episodes: 6}
+bc_training: {epochs: 2, updates_per_epoch: 2, validation_episodes: 2, validation_every: 1}
+value_training: {epochs: 2, updates_per_epoch: 2}
+recap: {epochs: 2, updates_per_epoch: 2}
+evaluation: {episodes: 2, pool_size: 2, suites: [id]}

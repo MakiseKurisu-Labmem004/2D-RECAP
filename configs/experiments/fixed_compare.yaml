@@ -1,0 +1,2 @@
+extends: recap.yaml
+run: {name: fixed_compare, stages: [physics, expert, freeze, bc, rollout, value, label, compare, diagnose]}

@@ -1,0 +1,185 @@
+{
+  "runs": [
+    "D:\\Embodied Intelligence\\RL\\2D-RECAP\\runs\\20261116_161643_561960_smoke_seed1_d44e5bd1df64",
+    "D:\\Embodied Intelligence\\RL\\2D-RECAP\\runs\\20261116_161712_680955_smoke_seed2_d859a2bb3eeb",
+    "D:\\Embodied Intelligence\\RL\\2D-RECAP\\runs\\20261116_161740_686755_smoke_seed3_4bd9ff5dea3a"
+  ],
+  "seeds": [
+    1,
+    2,
+    3
+  ],
+  "metrics": {
+    "conditioned.id.episodes": {
+      "mean": 2.0,
+      "sample_std": 0.0,
+      "training_seeds": 3
+    },
+    "conditioned.id.first_grasp_success_rate": {
+      "mean": 0.0,
+      "sample_std": 0.0,
+      "training_seeds": 3
+    },
+    "conditioned.id.mean_regrasps": {
+      "mean": 0.0,
+      "sample_std": 0.0,
+      "training_seeds": 3
+    },
+    "conditioned.id.mean_return": {
+      "mean": -399.0,
+      "sample_std": 0.0,
+      "training_seeds": 3
+    },
+    "conditioned.id.success_rate": {
+      "mean": 0.0,
+      "sample_std": 0.0,
+      "training_seeds": 3
+    },
+    "conditioned.recovery.drop.episodes": {
+      "mean": 2.0,
+      "sample_std": 0.0,
+      "training_seeds": 3
+    },
+    "conditioned.recovery.drop.first_grasp_success_rate": {
+      "mean": 1.0,
+      "sample_std": 0.0,
+      "training_seeds": 3
+    },
+    "conditioned.recovery.drop.mean_regrasps": {
+      "mean": 0.0,
+      "sample_std": 0.0,
+      "training_seeds": 3
+    },
+    "conditioned.recovery.drop.mean_return": {
+      "mean": -327.0,
+      "sample_std": 0.0,
+      "training_seeds": 3
+    },
+    "conditioned.recovery.drop.recovery_success_rate": {
+      "mean": 0.0,
+      "sample_std": 0.0,
+      "training_seeds": 3
+    },
+    "conditioned.recovery.drop.success_rate": {
+      "mean": 0.0,
+      "sample_std": 0.0,
+      "training_seeds": 3
+    },
+    "conditioned.recovery.empty.episodes": {
+      "mean": 2.0,
+      "sample_std": 0.0,
+      "training_seeds": 3
+    },
+    "conditioned.recovery.empty.first_grasp_success_rate": {
+      "mean": 0.0,
+      "sample_std": 0.0,
+      "training_seeds": 3
+    },
+    "conditioned.recovery.empty.mean_regrasps": {
+      "mean": 0.0,
+      "sample_std": 0.0,
+      "training_seeds": 3
+    },
+    "conditioned.recovery.empty.mean_return": {
+      "mean": -373.0,
+      "sample_std": 0.0,
+      "training_seeds": 3
+    },
+    "conditioned.recovery.empty.recovery_success_rate": {
+      "mean": 0.0,
+      "sample_std": 0.0,
+      "training_seeds": 3
+    },
+    "conditioned.recovery.empty.success_rate": {
+      "mean": 0.0,
+      "sample_std": 0.0,
+      "training_seeds": 3
+    },
+    "initial_bc.id.episodes": {
+      "mean": 2.0,
+      "sample_std": 0.0,
+      "training_seeds": 3
+    },
+    "initial_bc.id.first_grasp_success_rate": {
+      "mean": 0.0,
+      "sample_std": 0.0,
+      "training_seeds": 3
+    },
+    "initial_bc.id.mean_regrasps": {
+      "mean": 0.0,
+      "sample_std": 0.0,
+      "training_seeds": 3
+    },
+    "initial_bc.id.mean_return": {
+      "mean": -399.0,
+      "sample_std": 0.0,
+      "training_seeds": 3
+    },
+    "initial_bc.id.success_rate": {
+      "mean": 0.0,
+      "sample_std": 0.0,
+      "training_seeds": 3
+    },
+    "initial_bc.recovery.drop.episodes": {
+      "mean": 2.0,
+      "sample_std": 0.0,
+      "training_seeds": 3
+    },
+    "initial_bc.recovery.drop.first_grasp_success_rate": {
+      "mean": 1.0,
+      "sample_std": 0.0,
+      "training_seeds": 3
+    },
+    "initial_bc.recovery.drop.mean_regrasps": {
+      "mean": 0.0,
+      "sample_std": 0.0,
+      "training_seeds": 3
+    },
+    "initial_bc.recovery.drop.mean_return": {
+      "mean": -327.0,
+      "sample_std": 0.0,
+      "training_seeds": 3
+    },
+    "initial_bc.recovery.drop.recovery_success_rate": {
+      "mean": 0.0,
+      "sample_std": 0.0,
+      "training_seeds": 3
+    },
+    "initial_bc.recovery.drop.success_rate": {
+      "mean": 0.0,
+      "sample_std": 0.0,
+      "training_seeds": 3
+    },
+    "initial_bc.recovery.empty.episodes": {
+      "mean": 2.0,
+      "sample_std": 0.0,
+      "training_seeds": 3
+    },
+    "initial_bc.recovery.empty.first_grasp_success_rate": {
+      "mean": 0.0,
+      "sample_std": 0.0,
+      "training_seeds": 3
+    },
+    "initial_bc.recovery.empty.mean_regrasps": {
+      "mean": 0.0,
+      "sample_std": 0.0,
+      "training_seeds": 3
+    },
+    "initial_bc.recovery.empty.mean_return": {
+      "mean": -373.0,
+      "sample_std": 0.0,
+      "training_seeds": 3
+    },
+    "initial_bc.recovery.empty.recovery_success_rate": {
+      "mean": 0.0,
+      "sample_std": 0.0,
+      "training_seeds": 3
+    },
+    "initial_bc.recovery.empty.success_rate": {
+      "mean": 0.0,
+      "sample_std": 0.0,
+      "training_seeds": 3
+    }
+  },
+  "purpose": "Engineering smoke only: six demonstrations, two epochs, two optimizer updates per epoch, two test scenes per seed; not a scientific comparison."
+}

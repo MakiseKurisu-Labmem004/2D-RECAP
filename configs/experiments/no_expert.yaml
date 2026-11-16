@@ -1,0 +1,3 @@
+extends: recap.yaml
+run: {name: no_expert_retention}
+recap: {expert_ratio: 0.0}

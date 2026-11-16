@@ -1,0 +1,3 @@
+extends: recap.yaml
+run: {name: aggregate_bc}
+recap: {method: aggregate_bc}

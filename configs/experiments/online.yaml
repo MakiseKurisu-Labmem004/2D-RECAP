@@ -1,0 +1,3 @@
+extends: recap.yaml
+run: {name: online, stages: [physics, expert, freeze, bc, rollout, value, label, compare, online, evaluate, diagnose]}
+recap: {rounds: 3}
