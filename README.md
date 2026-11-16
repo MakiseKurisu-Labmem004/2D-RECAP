@@ -118,3 +118,12 @@ python -m minimal_recap.replay --run runs/<run> --episode runs/<run>/expert/0000
 本工程刻意限制为平面接触、已知数值状态、桌面单块物体与固定朝向夹爪。闭环专家依赖环境可读接触，但学习网络只看声明数值特征。默认 YAML 是低成本起点，不保证两个 epoch BC 会抓取，也不预设 RECAP 优于 BC 或所有 OOD 可泛化。正式实验需要足够示范、ID 验证确定预算、多个训练种子以及固定数据集比较后再迭代。所有成功率必须引用具体 run，未运行实验不得写成结论。
 
 实现依据：MuJoCo 的 [position servo 与 XML](https://mujoco.readthedocs.io/en/stable/XMLreference.html)、Gymnasium 的 [自定义环境接口](https://gymnasium.farama.org/introduction/create_custom_env/)；本项目将任务内预算耗尽建模为任务终止，明确区分外部采集截断。
+
+导出 MP4（可选视频依赖；服务器渲染需要 EGL 或 OSMesa）：
+
+```bash
+uv pip install "imageio>=2.34" "imageio-ffmpeg>=0.5"
+MUJOCO_GL=egl python -m minimal_recap.replay --run runs/gpu_seed1 --episode runs/gpu_seed1/expert/000000.npz --output runs/gpu_seed1/expert_rollout.mp4 --title "Expert rollout"
+```
+
+MP4 使用原始控制频率，H.264 编码；图像从保存的 MuJoCo 物理状态渲染，回放不会影响数据或策略。
