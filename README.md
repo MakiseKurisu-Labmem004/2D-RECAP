@@ -40,6 +40,14 @@ Slurm 脚本申请 16 vCPU / 32 GB / 12 小时，默认同样只采集 200 条�
 
 默认小 MLP 用 CPU 单线程，通常更经济；GPU 可用 `configs/experiments/server_cuda.yaml`。按服务器驱动安装匹配的官方 PyTorch CUDA wheel，再运行该配置；不要假设任意 CUDA wheel 都能匹配本机驱动。上述 uv 安装命令和 server.sh 明确使用 CPU wheel；CUDA 路径提供支持，本次本地测试仅验证 CPU。GPU 运行请在所在集群添加相应 GPU 分区和资源指令。
 
+项目在 `seed_all()` 中默认设置 `CUBLAS_WORKSPACE_CONFIG=:4096:8`，并保留外部显式设置的值，以支持 CUDA 确定性训练。若服务器仍使用旧代码并在 backward 报 CuBLAS 确定性错误，可在启动 Python 前设置：
+
+```bash
+CUBLAS_WORKSPACE_CONFIG=:4096:8 python -u -m minimal_recap.run --config configs/experiments/server_cuda.yaml --resume runs/gpu_seed1 --stages bc
+```
+
+沿用原配置和 run 目录即可，已有完整 epoch 的训练 checkpoint 会被恢复。
+
 多训练种子及汇总：
 
 ```bash

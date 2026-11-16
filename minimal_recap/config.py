@@ -2,6 +2,7 @@ from pathlib import Path
 import copy
 import hashlib
 import json
+import os
 import random
 import subprocess
 import numpy as np
@@ -45,6 +46,8 @@ def load(path):
 
 
 def seed_all(seed):
+    # Configure deterministic CuBLAS before seeding or initializing CUDA.
+    os.environ.setdefault('CUBLAS_WORKSPACE_CONFIG', ':4096:8')
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
