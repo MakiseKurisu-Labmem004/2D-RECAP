@@ -97,7 +97,7 @@ class ObstacleReach2D(gym.Env):
         if truncated:
             reason = 'timeout'
         self.done = terminated or truncated
-        return self.obs(), (0. if success else -150. if self.done else -1.), terminated, truncated, dict(
+        return self.obs(), (0. if success else -float(c['horizon']) if self.done else -1.), terminated, truncated, dict(
             success=bool(success), failure_reason=reason, distance=distance, collision='collision' in reason,
             applied_command=command.copy(), control_commands=commands, substep_qpos=poses,
             executed_substeps=executed, clearance=min_gap)

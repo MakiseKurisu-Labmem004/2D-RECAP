@@ -263,7 +263,7 @@ runs/seed42/improvement/pooled-v1/
 
 观测明确为 **9D**：两关节的 sin（2D）、cos（2D）、目标坐标（2D）、障碍物中心（2D）及半径（1D）。条件策略使用三态 one-hot（低/高/null），因此网络输入 12D。目标与障碍物在同一世界坐标系，位置和半径使用米；动作单位 rad，默认 ±0.04。
 
-默认 500 步任务最差回报为 -649，统一使用 horizon+149 归一化；旧 200 步运行仍自动使用 349。成功终止奖励 0，其余普通步 -1，碰撞、约束和超时终止 -150；提高控制频率后每物理秒包含更多普通步，回报不应与旧运行直接比较。gamma=1，所有终止（含超时）取消 bootstrap。默认 TD horizon=25。quantile 筛选只表示排名，不能称为正优势。
+成功终止奖励 0，其余普通步 -1，碰撞、约束和超时终止奖励为 `-env.horizon`。默认 500 步任务失败终止奖励 -500，最差总回报 -999，统一使用 `2*horizon-1` 归一化。因此时限内最慢成功的回报也高于第一步失败。Value/RECAP 训练会在内存中将旧轨迹的失败奖励改为新定义，原始 NPZ 与 BC 可以复用；旧 Value/RECAP 训练断点不能续训，需要重新训练，新 checkpoint 记录 `train.reward_version`。旧 Value 不用于新奖励下的 Advantage 标注，前端补算历史实验仍保留其旧模型的奖励尺度。提高控制频率后每物理秒包含更多普通步，回报不应与旧运行直接比较。gamma=1，所有终止（含超时）取消 bootstrap。默认 TD horizon=25。quantile 筛选只表示排名，不能称为正优势。
 
 RECAP 中原始专家示范帧与专家实际接管帧强制使用高优势条件，自主帧按估计 Advantage 和阈值标记；Value 的回报监督与数值 Advantage 保持原定义。`diagnostics.json` 的 `selected_fraction` 表示最终标签中高优势帧占比，`estimated_selected_fraction` 保留按数值 Advantage 阈值筛选的占比。RECAP 使用 null NLL + alpha×高优势 NLL，另以 0.1 权重学习低条件，条件 dropout 可配置。Gaussian 标签在边界做 1e-6 数值裁剪，以避免 atanh 无穷；评测使用 tanh(mean)。BC/SFT 使用以动作范围归一化的 MSE。SFT 从 BC checkpoint 初始化，保留专家并加入成功 rollout；RECAP 从随机 Gaussian 网络训练。Value 使用专家和混合 rollout，validation 按场景独立；模型保存最佳验证 checkpoint 和最近训练状态。
 

@@ -1,5 +1,6 @@
 """Local, dependency-free viewer for a RECAP run. Never modifies run files."""
 import argparse
+import hashlib
 import ast
 import json
 import math
@@ -50,15 +51,47 @@ def episode(path, fields):
 def build_index(run):
     scenes = json.loads((run / 'scenes.json').read_text(encoding='utf-8'))
     config = json.loads((run / 'config.json').read_text(encoding='utf-8'))
-    scene_ids = {scene['scene_id'] for group in scenes.values() for scene in group}
+    scene_map = {scene['scene_id']: scene for group in scenes.values() for scene in group}
     rows = []
-    for path in sorted((run / 'data').glob('*/*/*.npz')):
+    collections = [dict(id='base', label='基础数据 · Expert / BC')]
+    improvements = []
+    paths = [(p, 'base') for p in sorted((run / 'data').glob('*/*/*.npz'))]
+    def read_json(path, default):
+        return json.loads(path.read_text(encoding='utf-8')) if path.exists() else default
+    def metrics(report):
+        return {key: value for key, value in ((report or {}).get('metrics') or {}).items() if not isinstance(value, (list, dict))}
+    for experiment in sorted((run / 'improvement').glob('*')):
+        if not experiment.is_dir():
+            continue
+        protocol = read_json(experiment / 'protocol.json', {})
+        baseline = read_json(experiment / 'baseline.json', {})
+        study = dict(name=experiment.name, protocol={key: protocol.get(key) for key in ('evaluation_protocol', 'scene_pool_size', 'scene_pool_sources', 'options')},
+                     holdout_scenes=len(protocol.get('holdout_scene_ids', [])), baseline={key: metrics(report) for key, report in baseline.items()}, rounds=[])
+        for mode in protocol.get('modes', ['autonomous', 'corrections']):
+            for round_path in sorted((experiment / mode).glob('round-*')):
+                if not round_path.is_dir():
+                    continue
+                context = round_path.relative_to(run).as_posix()
+                label = f'{experiment.name} / {mode} / {round_path.name}'
+                collections.append(dict(id=context, label=label))
+                paths.extend((p, context) for p in sorted((round_path / 'data').glob('*/*/*.npz')))
+                result = read_json(round_path / 'result.json', {})
+                gate = result.get('gate', {})
+                study['rounds'].append(dict(collection=context, mode=mode, round=result.get('round', round_path.name),
+                    budget=result.get('budget', {}), accepted=gate.get('accepted'),
+                    recovered=len(gate.get('recovered', [])), regressions=len(gate.get('regressions', [])),
+                    validation_regressions=len(gate.get('validation_regressions', [])),
+                    candidate=metrics(result.get('candidate_adaptation')), active=metrics(result.get('active_adaptation')),
+                    validation=metrics(result.get('candidate_validation')),
+                    diagnostics=read_json(round_path / 'diagnostics.json', {}),
+                    histories={p.name.removesuffix('.history.json'): [{k: v for k, v in row.items() if not isinstance(v, (list, dict))} for row in read_json(p, [])] for p in round_path.glob('*.history.json')}))
+        improvements.append(study)
+    for path, context in paths:
         item = episode(path, ['scene_id', 'episode_id', 'success', 'reward', 'failure_reason', 'policy_version'])
-        if item['scene_id'] not in scene_ids:
+        if item['scene_id'] not in scene_map:
             raise ValueError(f'{path}: scene_id missing from scenes.json')
-        relative = path.relative_to(run / 'data')
-        rows.append(dict(path=relative.as_posix(), scene_id=item['scene_id'], episode_id=item['episode_id'],
-                         split=relative.parts[0], source=relative.parts[1], steps=len(item['reward']),
+        rows.append(dict(path=path.relative_to(run).as_posix(), collection=context, scene_id=item['scene_id'], episode_id=item['episode_id'],
+                         split=scene_map[item['scene_id']]['split'], source=path.parent.name, steps=len(item['reward']),
                          success=bool(item['success'][-1]), total_return=sum(item['reward']),
                          failure_reason=item['failure_reason'][-1]))
     generation_path = run / 'generation.json'
@@ -71,7 +104,7 @@ def build_index(run):
         evaluations.update(json.loads(path.read_text(encoding='utf-8')))
     migration_path = run / 'migration.json'
     spec_path = run / 'data.spec.json'
-    return dict(run=run.name, config=config,
+    return dict(run=run.name, config=config, collections=collections, improvements=improvements,
                 histories=histories, evaluations=evaluations,
                 data_spec=json.loads(spec_path.read_text(encoding='utf-8')) if spec_path.exists() else {},
                 training_configs={p.name.removeprefix('training.').removesuffix('.json'): json.loads(p.read_text(encoding='utf-8')) for p in sorted(run.glob('training.*.json'))},
@@ -100,6 +133,8 @@ class RunStore:
             files.append(self.run / 'data.spec.json')
             files.extend(sorted(self.run.glob('training.*.json')))
             files.extend(sorted(self.run.glob('*.goal_anchors.json')))
+            files.extend(sorted((self.run / 'improvement').rglob('*.json')))
+            files.extend(sorted((self.run / 'improvement').rglob('*.npz')))
             signature = tuple((str(p), p.stat().st_mtime_ns, p.stat().st_size) for p in files if p.exists())
             if signature != self.signature:
                 index = build_index(self.run)
@@ -130,11 +165,21 @@ class Handler(SimpleHTTPRequestHandler):
                 relative = parse_qs(url.query).get('path', [''])[0]
                 if relative not in {e['path'] for e in self.store.get()['episodes']}:
                     return self.send_error(404)
-                return self.send_json(episode(self.run / 'data' / relative,
+                raw = episode(self.run / relative,
                     ['qpos', 'action', 'reward', 'clearance', 'success', 'failure_reason', 'scene_id', 'episode_id',
                      'distance', 'goal_hold_steps', 'success_distance', 'strict_success_distance',
-                     'goal_hold_required', 'control_dt', 'physics_timestep', 'executed_substeps']))
-            if url.path not in ('/', '/index.html', '/app.js', '/research.js', '/style.css', '/favicon.svg'):
+                     'goal_hold_required', 'control_dt', 'physics_timestep', 'executed_substeps',
+                     'initial_qpos', 'scene_json', 'takeover_step', 'control_step_offset', 'intervention_mask', 'task_success', 'parent_episode_id', 'value_prediction', 'mc_return', 'td_advantage',
+                     'advantage_indicator', 'value_alignment', 'advantage_threshold', 'n_step', 'return_scale',
+                     'value_checkpoint', 'value_checkpoint_sha256', 'annotation_round', 'within_task_horizon'])
+                cache = Path(__file__).resolve().parent / '.cache' / 'value' / self.run.name / Path(relative).with_suffix('.json')
+                if not all(key in raw for key in ('value_prediction', 'td_advantage')) and cache.exists():
+                    saved = json.loads(cache.read_text(encoding='utf-8'))
+                    critic = (self.run / saved['value_checkpoint']).resolve()
+                    if critic.is_relative_to(self.run.resolve()) and critic.is_file() and saved['trajectory_sha256'] == hashlib.sha256((self.run / relative).read_bytes()).hexdigest() and saved['value_checkpoint_sha256'] == hashlib.sha256(critic.read_bytes()).hexdigest():
+                        raw.update(saved)
+                return self.send_json(raw)
+            if url.path not in ('/', '/index.html', '/app.js', '/research.js', '/improvement.js', '/learning.js', '/style.css', '/favicon.svg'):
                 return self.send_error(404)
             return super().do_GET()
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):

@@ -191,6 +191,8 @@ def test_pair_keeps_original_data_and_limits_extra_expert_labels(tmp_path,cfg,mo
 
 
 def test_demonstrations_and_only_teacher_frames_receive_forced_positive_labels(tmp_path,cfg,monkeypatch):
+    from recap.rewards import REWARD_VERSION
+    cfg['train']['reward_version']=REWARD_VERSION
     expert=dict(observation=np.zeros((3,9),dtype=np.float32),action=np.zeros((3,2),dtype=np.float32),
                 reward=-np.ones(3),success=np.array([True]),episode_id=np.array('original'),scene_id=np.array('same-scene'))
     corrected=copy.deepcopy(expert)
@@ -251,7 +253,7 @@ def test_value_targets_keep_task_timeout_for_extended_expert_recovery(cfg):
             failure_reason=np.array(['']*5),intervention_mask=np.ones(5,dtype=bool),initial_qpos=np.array([1.,2.]))
     view=improve.correction_value_episode(ep,cfg)
     assert len(view['action'])==2 and view['truncated'][-1] and not view['terminated'][-1]
-    assert not view['success'].any() and view['reward'][-1]==-150 and view['failure_reason'][-1]=='timeout'
+    assert not view['success'].any() and view['reward'][-1]==-cfg['env']['horizon'] and view['failure_reason'][-1]=='timeout'
     assert ep['success'][-1] and len(ep['action'])==5 and ep['reward'][-1]==0
     np.testing.assert_array_equal(view['initial_qpos'],[1.,2.])
 

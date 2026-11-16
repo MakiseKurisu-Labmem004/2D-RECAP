@@ -17,6 +17,7 @@ from .observations import OBSERVATION_DIM,convert_episode
 from .training import make_optimizer,train_steps,positive_integer,save_checkpoint
 from .goal_supervision import goal_anchors
 from .configuration import resolve_config,check_environment,check_data_spec,check_resume,save_training_config
+from .rewards import REWARD_VERSION,return_scale,relabel_rewards,check_value_rewards
 
 
 def save_json(path,obj):
@@ -65,6 +66,7 @@ def load_model(root,name,cfg,checkpoint=None):
     path=Path(checkpoint) if checkpoint is not None else root/f'{name}.pt'
     ck=torch.load(path,map_location=device(cfg),weights_only=False)
     check_checkpoint_observations(ck,name)
+    if name=='value': check_value_rewards(ck)
     model_cfg=ck.get('config',cfg)
     if model_cfg['env']!=cfg['env']:
         raise ValueError('Checkpoint environment differs from this run; evaluate with its matching run/config.json')
@@ -90,9 +92,10 @@ def policy(model):
 
 
 def annotate(eps,model,cfg):
-    scale=cfg['env']['horizon']+149
+    scale=return_scale(cfg['env']['horizon'])
     with tqdm(eps,desc='Value/advantage',unit='episode',leave=False,dynamic_ncols=True) as progress:
         for ep in progress:
+            relabel_rewards(ep,cfg['env']['horizon'])
             with torch.no_grad():
                 ep['value_prediction']=model.value(torch.tensor(ep['observation'],device=device(cfg))).cpu().numpy()
                 nv=model.value(torch.tensor(ep['next_observation'],device=device(cfg))).cpu().numpy()
@@ -113,6 +116,8 @@ def fit(root,kind,cfg,resume=False,*,expert_root=None,extra_train=(),extra_valid
     if checkpoint:
         check_checkpoint_observations(checkpoint,kind)
         check_environment(cfg,checkpoint.get('config',cfg))
+        if kind in ('value','recap'): check_value_rewards(checkpoint)
+    if kind in ('value','recap'): tc['reward_version']=REWARD_VERSION
     source=load_model(root,'bc',cfg) if kind=='sft' else None
     saved_train=checkpoint.get('config',{}).get('train',{}) if checkpoint else {}
     tc.pop('policy_use_velocity',None)
@@ -140,6 +145,7 @@ def fit(root,kind,cfg,resume=False,*,expert_root=None,extra_train=(),extra_valid
         val=[ep for ep in val if ep['success'][-1]]
     if not train or not val: raise RuntimeError('Generate training and validation episodes first')
     for ep in train+val:
+        if kind in ('value','recap'): relabel_rewards(ep,cfg['env']['horizon'])
         action=np.asarray(ep['action'])
         if 'intervention_mask' in ep and np.asarray(ep['intervention_mask']).shape!=(len(action),):
             raise ValueError('intervention_mask must identify individual trajectory frames')
@@ -179,7 +185,7 @@ def fit(root,kind,cfg,resume=False,*,expert_root=None,extra_train=(),extra_valid
             note='Increase rollout budget if positive or successful coverage is insufficient; no automatic performance claim.'))
     def tensors(eps):
         x=np.concatenate([e['observation'] for e in eps])
-        y=np.concatenate([returns(e['reward'],cfg['env']['horizon']+149) if kind=='value' else e['action'] for e in eps])
+        y=np.concatenate([returns(e['reward'],return_scale(cfg['env']['horizon'])) if kind=='value' else e['action'] for e in eps])
         label=np.concatenate([np.stack((e['advantage_indicator'],e.get('intervention_mask',np.zeros(len(e['action'])))),axis=1)
                               for e in eps]) if kind=='recap' else np.zeros(len(x))
         return tuple(torch.tensor(a,dtype=torch.float32,device=dev) for a in (x,y,label))

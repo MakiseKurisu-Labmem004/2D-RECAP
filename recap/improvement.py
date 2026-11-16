@@ -24,6 +24,7 @@ from .generation import write_json
 from .geometry import points
 from .planning import ik, plan, rollout
 from .splines import UnsafeSplineError
+from .rewards import return_scale
 
 
 def partition_scenes(scenes, fraction, seed):
@@ -148,7 +149,7 @@ def correction_value_episode(ep,cfg):
     for key in keys:
         if key in ep: result[key]=ep[key][:remaining].copy()
     result['terminated'][-1]=False;result['truncated'][-1]=True;result['success'][:]=False
-    result['reward'][-1]=-150.
+    result['reward'][-1]=-float(cfg['env']['horizon'])
     result['failure_reason']=result['failure_reason'].astype('<U32')
     result['failure_reason'][-1]='timeout'
     result['value_task_prefix']=np.array(True)
@@ -175,7 +176,7 @@ def evaluate_scenes(model, scenes, cfg, seed, description,*,record_root=None,rec
                 ep['advantage_indicator']=ep['td_advantage']>cfg['train']['threshold']
                 ep.update(value_checkpoint_sha256=np.array(value_digest),
                           advantage_threshold=np.array(cfg['train']['threshold']),n_step=np.array(cfg['train']['n_step']),
-                          return_scale=np.array(cfg['env']['horizon']+149))
+                          return_scale=np.array(return_scale(cfg['env']['horizon'])))
             ep['value_alignment']=np.array('observation_before_action')
             ep.update(policy_checkpoint_sha256=np.array(policy_digest),policy_checkpoint_step=np.array(policy_info.get('step') or -1))
             store(record_root,'evaluation',record_source,ep)
@@ -207,7 +208,7 @@ def record_annotations(root, episodes, origins, cfg, round_index):
                       value_checkpoint=np.array(Path(os.path.relpath(critic,directory)).as_posix()),
                       value_checkpoint_sha256=np.array(digest),annotation_round=np.array(round_index),
                       advantage_threshold=np.array(threshold),n_step=np.array(cfg['train']['n_step']),
-                      return_scale=np.array(cfg['env']['horizon']+149),
+                      return_scale=np.array(return_scale(cfg['env']['horizon'])),
                       value_alignment=np.array('observation_before_action'))
         offset=int(ep.get('control_step_offset',0))
         fields.update(control_step_offset=np.array(offset),task_step_index=np.arange(length)+offset,

@@ -42,7 +42,7 @@ def test_environment_timeout_and_action(cfg):
         q=env.data.qpos.copy()
         _,r,term,trunc,info=env.step(np.zeros(2))
         np.testing.assert_allclose(info['applied_command'],q)
-        assert trunc and not term and r==-150
+        assert trunc and not term and r==-c['horizon']
         with pytest.raises(RuntimeError): env.step(np.zeros(2))
     finally: env.close()
 
@@ -51,7 +51,7 @@ def test_collision(cfg):
     try:
         env.reset(options={'scene':dict(q0=[0.,0.],goal=[0.,.8],obstacle=[.25,0.],radius=.07)})
         _,r,term,trunc,info=env.step(np.zeros(2))
-        assert term and not trunc and r==-150 and info['collision']
+        assert term and not trunc and r==-cfg['env']['horizon'] and info['collision']
     finally: env.close()
 
 def test_models(cfg):

@@ -124,6 +124,8 @@ def rollout(env,scene,policy,seed,version,noise=0.,limit=None,reset=True,until_d
         obs=nxt
         if term or trunc: break
     ep={k:np.asarray([row[k] for row in rows]) for k in rows[0]}
+    from .rewards import REWARD_VERSION
+    ep['reward_version']=np.array(REWARD_VERSION)
     ep.update(scene_id=np.array(scene['scene_id']),episode_id=np.array(f'{version}-{seed}'),seed=np.array(seed),
               policy_version=np.array(version),action_source=np.array('expert' if version=='expert' else 'policy'),
               exploration=np.array(noise),success_distance=np.array(env.cfg['success_distance']),
