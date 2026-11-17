@@ -1,7 +1,9 @@
 extends: arm3r.yaml
 run:
-  name: initial_bc_50k
+  name: initial_bc_500demos_50k
   stages: [physics, expert, freeze, bc, evaluate]
+expert_rollout:
+  successes: 500
 bc_training:
   # An epoch is a block of sampled optimizer updates, not a full data pass.
   epochs: 1000

@@ -22,7 +22,7 @@
 
 ## initial_bc长训练入口与曲线验证
 
-新增configs/experiments/initial_bc.yaml：50,000次梯度更新、batch 256，每2,500步验证100个固定ID场景，共20个评估点。本机PyTorch为2.7.1+cpu，尚未执行正式CUDA的50,000步实验。
+当前configs/experiments/initial_bc.yaml目标采集500条成功专家示范（425条训练、75条监督验证）：50,000次梯度更新、batch 256，每2,500步验证100个固定ID场景，共20个评估点。本机PyTorch为2.7.1+cpu，尚未执行正式CUDA的50,000步实验。
 
 - 24项相关测试通过，命令为`python -m pytest -q tests/test_training_schedule.py tests/test_contracts.py tests/test_upright.py`。覆盖训练中断后续跑、评估间隔不漂移、历史不重复、最佳与最终checkpoint区分、未验证处保持缺失值，以及MC/优势和各训练路径。
 - 用相同随机种子比较中断续跑与连续训练，最终模型所有参数和缓冲区逐位相同；已完成训练再次调用不追加评估点。

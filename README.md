@@ -42,7 +42,7 @@ python -m pytest -q
 | online.yaml | 3轮在线迭代 |
 | aggregate_bc.yaml / success_bc.yaml | 聚合BC / 成功轨迹BC |
 | bc_only.yaml | 继承基础预算的初始BC |
-| initial_bc.yaml | 初始BC训练50,000次更新，每2,500次更新验证并导出曲线 |
+| initial_bc.yaml | 500条成功专家示范，初始BC训练50,000次更新，每2,500次更新验证并导出曲线 |
 | n1.yaml / hard_bins.yaml / no_expert.yaml / noisy.yaml | n步、分布标签、专家保留、探索消融 |
 | recap.yaml | 默认RECAP实验入口 |
 
@@ -54,21 +54,27 @@ python -u -m minimal_recap.run --config configs/experiments/smoke.yaml
 
 ## 先运行 initial_bc：50,000步
 
-这里的步数指梯度更新次数。`initial_bc.yaml`使用100条成功专家示范，按整轨迹留出15%做监督验证；batch size为256，学习率0.0003，CUDA训练。1000个epoch块×每块50次更新=50,000步，每50个块（2,500步）执行一次策略验证，共20次。每次验证使用相同的100个独立ID场景（种子200000–200099）、无额外探索噪声、每回合最多300个控制步。
+这里的步数指梯度更新次数。`initial_bc.yaml`使用500条成功专家示范，按整轨迹划分为425条训练、75条监督验证（15%）；batch size为256，学习率0.0003，CUDA训练。1000个epoch块×每块50次更新=50,000步，每50个块（2,500步）执行一次策略验证，共20次。每次验证使用相同的100个独立ID场景（种子200000–200099）、无额外探索噪声、每回合最多300个控制步。
 
-在已通过uv配置好CUDA虚拟环境的服务器上，从仓库根目录分别执行；`--no-sync`复用现有环境，避免重装已配置的PyTorch后端：
+在已安装项目依赖和CUDA版PyTorch的Python环境中，从仓库根目录执行。配置增加了专家数量，使用新的run目录；单条命令执行全部阶段：
 
 ```bash
-uv run --no-sync python -u -m minimal_recap.run --config configs/experiments/initial_bc.yaml --resume runs/initial_bc_50k_seed1 --stages physics
-uv run --no-sync python -u -m minimal_recap.run --config configs/experiments/initial_bc.yaml --resume runs/initial_bc_50k_seed1 --stages expert
-uv run --no-sync python -u -m minimal_recap.run --config configs/experiments/initial_bc.yaml --resume runs/initial_bc_50k_seed1 --stages freeze
-uv run --no-sync python -u -m minimal_recap.run --config configs/experiments/initial_bc.yaml --resume runs/initial_bc_50k_seed1 --stages bc
-uv run --no-sync python -u -m minimal_recap.run --config configs/experiments/initial_bc.yaml --resume runs/initial_bc_50k_seed1 --stages evaluate
+python -u -m minimal_recap.run --config configs/experiments/initial_bc.yaml --resume runs/initial_bc_500demos_50k_seed1
+```
+
+也可以分别执行：
+
+```bash
+python -u -m minimal_recap.run --config configs/experiments/initial_bc.yaml --resume runs/initial_bc_500demos_50k_seed1 --stages physics
+python -u -m minimal_recap.run --config configs/experiments/initial_bc.yaml --resume runs/initial_bc_500demos_50k_seed1 --stages expert
+python -u -m minimal_recap.run --config configs/experiments/initial_bc.yaml --resume runs/initial_bc_500demos_50k_seed1 --stages freeze
+python -u -m minimal_recap.run --config configs/experiments/initial_bc.yaml --resume runs/initial_bc_500demos_50k_seed1 --stages bc
+python -u -m minimal_recap.run --config configs/experiments/initial_bc.yaml --resume runs/initial_bc_500demos_50k_seed1 --stages evaluate
 ```
 
 `bc`只训练初始策略，不训练Value或执行RECAP更新。最后的`evaluate`使用种子300000–300099评估验证选出的最佳BC，并单列恢复诊断；它不参与训练中成功率曲线或checkpoint选择。
 
-| 产物（均在runs/initial_bc_50k_seed1内） | 含义 |
+| 产物（均在runs/initial_bc_500demos_50k_seed1内） | 含义 |
 |---|---|
 | plots/bc/loss.png | 每50次更新的训练MSE均值及留出专家轨迹MSE，横轴为梯度步数 |
 | plots/bc/success_rate.png | 2500、5000、…、50000步的ID验证成功率，带95% Wilson区间 |
@@ -84,7 +90,7 @@ PNG和CSV在每次策略验证后更新，训练完成时再次导出。重新�
 可从已有日志重新导出曲线，无需GPU或再次训练：
 
 ```bash
-uv run --no-sync python -m minimal_recap.training_plots --run runs/initial_bc_50k_seed1
+python -m minimal_recap.training_plots --run runs/initial_bc_500demos_50k_seed1
 ```
 
 ## 通用流水线分步执行
