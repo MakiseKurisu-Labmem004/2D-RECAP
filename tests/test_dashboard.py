@@ -36,6 +36,26 @@ def test_episode_mapping_terminal_and_label_link(store):
     assert data['frames'][-1] == [1.]*25
     assert data['returns'] == [-201., -200.]
     assert data['labels']['advantage'] == [-1.,0.]
+    assert summary['label_count'] == 1
+    assert listing[0]['has_labels'] is True
+
+
+def test_all_sources_excludes_label_arrays(store):
+    run = store.root/'test_run'
+    (run/'evaluation'/'conditioned').mkdir(parents=True)
+    source = run/'rollouts'/'round_00'/'000007.npz'
+    (run/'evaluation'/'conditioned'/'000007.npz').write_bytes(source.read_bytes())
+    listing = store.episodes('test_run', '__all__')
+    assert len(listing) == 2
+    assert {row['group'] for row in listing} == {'evaluation/conditioned', 'rollouts/round_00'}
+    assert [row['has_labels'] for row in listing] == [False, True]
+
+
+def test_observation_width_matches_its_own_config(store):
+    path = store.root/'test_run'/'resolved.yaml'
+    path.write_text(yaml.safe_dump({'observation': {'features': ['object', 'gripper', 'goal']}}))
+    with pytest.raises(ValueError, match='Observation width'):
+        store.episode('test_run', 'rollouts/round_00/000007.npz')
 
 
 @pytest.mark.parametrize('source,status,success,truncated', [

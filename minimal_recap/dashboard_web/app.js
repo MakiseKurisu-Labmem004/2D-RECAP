@@ -3,7 +3,7 @@ const $ = id => document.getElementById(id);
 const esc = x => String(x ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmt = (n, d=2) => n == null || !Number.isFinite(Number(n)) ? '—' : Number(n).toFixed(d);
 const pct = n => n == null ? '—' : fmt(n*100,1)+'%';
-const names = {initial_bc:'Initial BC', aggregate_bc:'Aggregate BC', success_bc:'Success BC', conditioned:'RECAP · Conditioned', unconditioned:'Unconditioned'};
+const names = {initial_bc:'Initial BC', aggregate_bc:'Aggregate BC', success_bc:'Success BC', conditioned:'RECAP · Conditioned'};
 const colors = ['#237c68','#d9a34f','#82a0c4','#b78591'];
 let summary, episodes=[], filtered=[], episode, selected='', page=0, frame=0, playing=false, last=0, elapsed=0, loadVersion=0, groupVersion=0, epVersion=0;
 async function api(path, params={}) {
@@ -25,13 +25,23 @@ async function loadRun(){
     const best=evaluated.reduce((a,b)=>!a||b[1].id.success_rate>a[1].id.success_rate?b:a,null);
     const stats=[['轨迹总量',count.toLocaleString(),'已保存的专家、rollout 与评估轨迹','↗'],['最佳 ID 成功率',best?pct(best[1].id.success_rate):'—',best?(names[best[0]]||best[0])+' · 当前 run':'尚无评估结果','◉'],['专家示范',expert.toLocaleString(),'已保存的专家轨迹 · 非额外交互预算','⌁'],['评估策略',evaluated.length,'同 run 对照 · 95% Wilson 区间','▥']];
     $('stats').innerHTML=stats.map(([a,b,c,d])=>`<div class="stat"><div class="stat-label">${esc(a)}</div><span class="stat-icon">${d}</span><div class="value">${esc(b)}</div><div class="desc">${esc(c)}</div></div>`).join('');
-    options('group',summary.groups.map(g=>[g.name,`${g.name} · ${g.count}`]));
+    const groupName=name=>name==='expert'?'专家示范':name==='diagnostics'?'诊断轨迹':name.startsWith('evaluation/')?`评估 / ${names[name.split('/')[1]]||name.split('/')[1]}`:name.startsWith('rollouts/')?`Rollout / ${name.split('/')[1]}`:name;
+    options('group',[['__all__',`全部来源 · ${count}`],...summary.groups.map(g=>[g.name,`${groupName(g.name)} · ${g.count}`])]);
     if(summary.label_groups?.length) $('group').value=summary.label_groups[0];
     else if(summary.groups.some(g=>g.name==='expert')) $('group').value='expert';
     options('history',Object.keys(summary.histories).map(n=>[n,n]));
+    const distributions=new Set();
+    Object.values(summary.metrics).forEach(method=>Object.entries(method).forEach(([key,value])=>{
+      if(value?.success_rate!=null)distributions.add(key);
+      else if(key==='recovery'&&value&&typeof value==='object')Object.entries(value).forEach(([kind,m])=>{if(m?.success_rate!=null)distributions.add(`recovery.${kind}`);});
+    }));
+    const distributionNames={id:'ID · 统一分布','recovery.empty':'恢复 · 空抓','recovery.drop':'恢复 · 掉落'};
+    options('distribution',[...distributions].map(key=>[key,distributionNames[key]||key]));
     drawHistory(); drawMetrics();
     $('provenance').textContent=`training seed ${summary.manifest.seed?.training??'—'} · ${summary.config.model?.hidden_layers??'—'} × ${summary.config.model?.hidden_units??'—'} MLP · 本地只读`;
-    $('notice').textContent=summary.groups.length?'':'当前 run 尚无轨迹文件。';
+    const totalFor=prefix=>summary.groups.filter(g=>g.name===prefix||g.name.startsWith(prefix+'/')).reduce((sum,g)=>sum+g.count,0);
+    $('notice').textContent=summary.groups.length?`${summary.name} · 专家 ${totalFor('expert')} / Rollout ${totalFor('rollouts')} / 评估 ${totalFor('evaluation')} / 诊断 ${totalFor('diagnostics')} · ${summary.label_count??0} 份 Value / Advantage 标签`:'当前 run 尚无轨迹文件。';
+    $('search').value='';$('result-filter').value='all';$('labeled-only').checked=false;
     await loadGroup();
   }catch(ex){if(version===loadVersion)error(ex);}
 }
@@ -52,7 +62,7 @@ function filterEpisodes(){
   const query=$('search').value.trim().toLowerCase(), result=$('result-filter').value;
   filtered=episodes.filter(e=>{
     const m=e.metadata, text=[e.path,m.episode_id,m.seed,m.scene?.layout].join(' ').toLowerCase();
-    return text.includes(query)&&(result==='all'||(result==='success'&&m.success&&m.status==='complete')||(result==='failure'&&!m.success&&m.status==='complete')||(result==='aborted'&&m.status==='aborted'));
+    return (!$('labeled-only').checked||e.has_labels)&&text.includes(query)&&(result==='all'||(result==='success'&&m.success&&m.status==='complete')||(result==='failure'&&!m.success&&m.status==='complete')||(result==='aborted'&&m.status==='aborted'));
   });
   page=Math.min(page,Math.max(0,Math.ceil(filtered.length/10)-1)); renderList();
 }
@@ -60,7 +70,7 @@ function renderList(){
   $('ep-count').textContent=`${filtered.length} 条`;
   $('episode-list').innerHTML=filtered.slice(page*10,page*10+10).map(e=>{
     const m=e.metadata, result=m.status==='aborted'?'中断':m.success?'成功':'失败';
-    return `<button class="episode-item ${selected===e.path?'active':''}" data-path="${esc(e.path)}"><span class="row"><strong>${esc(m.episode_id||e.path)}</strong><span class="result ${m.success?'':'fail'}">● ${result}</span></span><span class="row"><small>${esc(m.scene?.layout||'—')} · seed ${esc(m.seed)}</small><small>${e.length} steps</small></span></button>`;
+    return `<button class="episode-item ${selected===e.path?'active':''}" data-path="${esc(e.path)}"><span class="row"><strong>${esc(m.episode_id||e.path)} ${e.has_labels?'<span class="label-chip">V/A</span>':''}</strong><span class="result ${m.success?'':'fail'}">● ${result}</span></span><span class="row"><small>${esc(m.scene?.layout||'—')} · seed ${esc(m.seed)}</small><small>${e.length} steps</small></span>${$('group').value==='__all__'?`<small>${esc(e.group)}</small>`:''}</button>`;
   }).join('')||'<div class="chart-empty">没有匹配的轨迹</div>';
   $('page').textContent=`${filtered.length?page+1:0} / ${Math.ceil(filtered.length/10)}`;
   $('prev').disabled=page===0; $('next').disabled=(page+1)*10>=filtered.length;
@@ -75,7 +85,7 @@ async function loadEpisode(path){
     $('ep-result').textContent=m.status==='aborted'?'中断':m.success?'成功完成':'任务失败'; $('ep-result').className='badge '+(m.success?'':'fail');
     $('scrub').max=Math.max(0,episode.frames.length-1); $('scrub').value=0;
     $('play').disabled=episode.frames.length<2;
-    const items=[['来源',m.source],['场景 / seed',`${m.scene?.layout??'—'} / ${m.seed??'—'}`],['终止原因',m.reason],['累计奖励',fmt(episode.reward.reduce((a,b)=>a+b,0),0)],['文件',path]];
+    const items=[['来源',m.source],['场景 / seed',`${m.scene?.layout??'—'} / ${m.seed??'—'}`],['终止原因',m.reason],['累计奖励',fmt(episode.reward.reduce((a,b)=>a+b,0),0)],['Value / Advantage',episode.labels.value?.length?`${episode.labels.value.length} 步已标注`:'未保存标签'],['文件',path]];
     $('ep-meta').innerHTML=items.map(([a,b])=>`<div><span>${esc(a)}</span><strong>${esc(b)}</strong></div>`).join('');
     updateFrame();
   }catch(ex){if(version===epVersion)error(ex);}
@@ -148,23 +158,46 @@ function drawSignal(){
   if(type==='position')series=[['夹爪 X',g],['夹爪 Z',g==null?null:g+1],['物块 X',o],['物块 Z',o==null?null:o+1]].filter(([,col])=>col!=null).map(([name,col])=>({name,points:episode.frames.map((f,i)=>[i,f[col]])}));
   if(type==='action')series=['dx','dz','dtheta','opening'].map((name,k)=>({name,points:episode.action.map((a,i)=>[i,a[k]])}));
   if(type==='return')series=[{name:'Reward',points:pts(episode.reward)},{name:'MC Return',points:pts(episode.returns||[])}];
-  if(type==='value')series=['value','advantage'].map(name=>({name,points:pts(episode.labels[name]||[])}));
+  if(type==='value'){drawValueComparison('signal-chart');return;}
   chart('signal-chart',series,{cursor:frame});
   if(type==='value'&&!series.some(s=>s.points.length))$('signal-chart').innerHTML='<div class="chart-empty">此轨迹没有 Value / Advantage 标签，可选择 rollouts/round_00。</div>';
 }
 function drawValuePanels(){
-  const labels=episode?.labels||{}, value=labels.value||[], advantage=labels.advantage||[], ret=labels.returns||episode?.returns||[];
+  const labels=episode?.labels||{}, value=labels.value||[], advantage=labels.advantage||[], ret=episode?.returns||labels.returns||[];
   const threshold=summary?.config.recap?.threshold??0, n=episode?.label_info?.n_step??summary?.config.recap?.n_step;
   const available=value.length>0&&advantage.length>0, at=frame<value.length;
   $('open-labeled').disabled=!summary?.label_groups?.length;
   $('value-note').textContent=available?`${episode.metadata.episode_id} · ${value.length} 步 · n = ${n??'—'} · 曲线随回放进度同步。V 是行为数据下的未来回报估计。`:'当前轨迹未保存 Value / Advantage 标签。专家、评估与未标注轮次不会自动生成预测，请点击“查看带标签轨迹”。';
   const mae=value.length&&ret.length===value.length?value.reduce((sum,v,i)=>sum+Math.abs(v-ret[i]),0)/value.length:null;
-  const stats=[['当前 V(s)',at?fmt(value[frame]):'—'],['当前 Advantage',frame<advantage.length?fmt(advantage[frame]):'—'],['高优势步占比',advantage.length?pct(advantage.filter(a=>a>threshold).length/advantage.length):'—'],['本轨迹 Value / MC MAE',fmt(mae)]];
+  const currentA=advantage[frame], hasA=Number.isFinite(currentA), high=hasA&&currentA>threshold;
+  const stats=[['当前 V(s)',at?fmt(value[frame]):'—'],['真实 MC Return',frame<ret.length?fmt(ret[frame]):'—'],['当前 Advantage',hasA?`${fmt(currentA)} <span class="adv-badge ${high?'high-adv':'low-adv'}">${high?'高优势':'低优势'}</span>`:'—'],['高优势步占比',advantage.length?pct(advantage.filter(a=>a>threshold).length/advantage.length):'—'],['本轨迹 Value / MC MAE',fmt(mae)]];
   $('value-stats').innerHTML=stats.map(([a,b])=>`<div>${a}<strong>${b}</strong></div>`).join('');
-  const points=a=>a.map((v,i)=>[i,v]);
-  chart('value-chart',[{name:'Value V(s)',points:points(value)},{name:'MC Return',points:available?points(ret):[]}],{cursor:at?frame:null});
-  chart('advantage-chart',[{name:'n-step Advantage',points:points(advantage)}],{cursor:frame<advantage.length?frame:null,reference:threshold});
-  $('advantage-rule').textContent=`高优势标签：A > ${threshold}；虚线为阈值。末帧为终止状态，没有动作标签。`;
+  drawValueComparison('value-comparison');
+  $('analysis-scrub').max=Math.max(0,(episode?.frames.length||1)-1);$('analysis-scrub').value=frame;$('analysis-scrub').disabled=!episode;
+  $('analysis-step').textContent=episode?`step ${frame} / ${episode.frames.length-1}`:'—';
+  $('advantage-rule').textContent=`绿色高优势：A > ${threshold}；红色低优势：A ≤ ${threshold}（等于阈值也属低优势）。虚线为 Advantage 阈值，底部色带逐步标注分类。左右轴独立刻度；点击图表或拖动滑块与轨迹同步，末帧无动作标签。`;
+}
+function drawValueComparison(id){
+  const host=$(id),v=episode?.labels.value||[],a=episode?.labels.advantage||[],r=episode?.returns||episode?.labels.returns||[];
+  if(!v.length&&!a.length&&!r.length){host.innerHTML='<div class="chart-empty">暂无 Value / Return / Advantage 数据，请选择带 V/A 标签的轨迹。</div>';return;}
+  const threshold=summary?.config.recap?.threshold??0, high='#237c68',low='#c86461';
+  const w=Math.max(300,host.clientWidth),h=host.clientHeight||350,L=55,R=55,T=15,B=45,bottom=h-B,maxStep=Math.max(1,(episode?.frames.length||1)-1);
+  const finite=arr=>arr.filter(Number.isFinite), left=finite([...v,...r]), right=finite([...a,threshold]);
+  const bounds=arr=>{const lo=Math.min(...arr),hi=Math.max(...arr),pad=Math.max((hi-lo)*.08,1);return [lo-pad,hi+pad];};
+  const [lo,hi]=bounds(left.length?left:[0]),[alo,ahi]=bounds(right),X=i=>L+i/maxStep*(w-L-R),Y=y=>bottom-(y-lo)/(hi-lo)*(bottom-T),A=y=>bottom-(y-alo)/(ahi-alo)*(bottom-T),zero=A(threshold);
+  const path=(arr,scale)=>arr.map((val,i)=>Number.isFinite(val)?`${i&&Number.isFinite(arr[i-1])?'L':'M'}${X(i).toFixed(2)},${scale(val).toFixed(2)}`:'').join(' ');
+  const clipHigh=id+'-high',clipLow=id+'-low';
+  let svg=`<svg viewBox="0 0 ${w} ${h}" role="img" aria-label="Value、真实 MC Return、绿色高优势和红色低优势"><defs><clipPath id="${clipHigh}"><rect x="${L}" y="${T}" width="${w-L-R}" height="${zero-T}"/></clipPath><clipPath id="${clipLow}"><rect x="${L}" y="${zero}" width="${w-L-R}" height="${bottom-zero}"/></clipPath></defs>`;
+  for(let i=0;i<=4;i++){const y=T+(bottom-T)*i/4;svg+=`<line x1="${L}" x2="${w-R}" y1="${y}" y2="${y}" stroke="#e8eee7"/><text x="${L-7}" y="${y+3}" text-anchor="end" fill="#507ca9" font-size="9">${fmt(hi-(hi-lo)*i/4,0)}</text><text x="${w-R+7}" y="${y+3}" fill="#83958b" font-size="9">${fmt(ahi-(ahi-alo)*i/4,1)}</text>`;}
+  svg+=`<line x1="${L}" x2="${w-R}" y1="${zero}" y2="${zero}" stroke="#b78591" stroke-dasharray="5 4"/><text x="${w-R-3}" y="${zero-5}" text-anchor="end" fill="#a46c78" font-size="9">A = ${threshold}</text>`;
+  svg+=`<path data-series="Value" d="${path(v,Y)}" fill="none" stroke="#507ca9" stroke-width="2"/><path data-series="MC Return" d="${path(r,Y)}" fill="none" stroke="#d9a34f" stroke-width="2"/>`;
+  const advPath=path(a,A);
+  svg+=`<path data-series="高优势" d="${advPath}" clip-path="url(#${clipHigh})" fill="none" stroke="${high}" stroke-width="1.6"/><path data-series="低优势" d="${advPath}" clip-path="url(#${clipLow})" fill="none" stroke="${low}" stroke-width="1.6"/>`;
+  a.forEach((val,i)=>{if(!Number.isFinite(val))return;const color=val>threshold?high:low;svg+=`<rect data-advantage="${val>threshold?'high':'low'}" x="${X(i)}" y="${bottom+7}" width="${Math.max(.4,(w-L-R)/maxStep)}" height="7" fill="${color}"><title>step ${i}: A=${fmt(val)} · ${val>threshold?'高优势':'低优势'}</title></rect>`;});
+  for(let i=0;i<=4;i++){const step=Math.round(maxStep*i/4);svg+=`<text x="${X(step)}" y="${h-10}" text-anchor="middle" fill="#91a095" font-size="9">${step}</text>`;}
+  svg+=`<line x1="${X(frame)}" x2="${X(frame)}" y1="${T}" y2="${bottom+16}" stroke="#506d61" stroke-dasharray="3 3"/>`;
+  [[v,Y,'#507ca9'],[r,Y,'#d9a34f'],[a,A,a[frame]>threshold?high:low]].forEach(([arr,scale,color])=>{if(Number.isFinite(arr[frame]))svg+=`<circle cx="${X(frame)}" cy="${scale(arr[frame])}" r="3" fill="${color}" stroke="white"/>`;});
+  host.innerHTML=svg+'</svg>';
 }
 function drawHistory(){
   const history=summary?.histories[$('history').value]||[];
@@ -181,15 +214,25 @@ async function init(){
   try{const old=$('run').value;const runs=await api('runs');options('run',runs.map(n=>[n,n]));if(runs.includes(old))$('run').value=old;if(runs.length)await loadRun();else{$('notice').textContent='runs 目录下暂无实验。';}}catch(ex){error(ex);}
 }
 $('run').onchange=loadRun; $('refresh').onclick=init; $('group').onchange=loadGroup;
-$('search').oninput=$('result-filter').onchange=()=>{page=0;filterEpisodes();};
+$('search').oninput=$('result-filter').onchange=$('labeled-only').onchange=()=>{page=0;filterEpisodes();if(filtered.length&&!filtered.some(e=>e.path===selected))loadEpisode(filtered[0].path);};
 $('prev').onclick=()=>{page--;renderList();}; $('next').onclick=()=>{page++;renderList();};
 $('episode-list').onclick=e=>{const item=e.target.closest('[data-path]');if(item)loadEpisode(item.dataset.path);};
 $('history').onchange=drawHistory; $('distribution').onchange=drawMetrics; $('signal').onchange=drawSignal; $('trail').onchange=drawScene;
 $('scrub').oninput=()=>{stopped();frame=Number($('scrub').value);updateFrame();};
+$('analysis-scrub').oninput=()=>{stopped();frame=Number($('analysis-scrub').value);updateFrame();};
+for(const id of ['value-comparison','signal-chart'])$(id).onclick=event=>{
+  if(!episode||(id==='signal-chart'&&$('signal').value!=='value'))return;
+  const rect=$(id).getBoundingClientRect(),w=Math.max(300,rect.width),x=(event.clientX-rect.left)/rect.width*w;
+  stopped();frame=Math.max(0,Math.min(episode.frames.length-1,Math.round((x-55)/(w-110)*(episode.frames.length-1))));updateFrame();
+};
+$('value-comparison').onkeydown=event=>{
+  if(!episode||!['ArrowLeft','ArrowRight','Home','End'].includes(event.key))return;
+  event.preventDefault();stopped();frame=event.key==='Home'?0:event.key==='End'?episode.frames.length-1:Math.max(0,Math.min(episode.frames.length-1,frame+(event.key==='ArrowRight'?1:-1)));updateFrame();
+};
 $('restart').onclick=()=>{stopped();frame=0;elapsed=0;updateFrame();};
 $('play').onclick=()=>{if(!episode)return;if(playing){stopped();return;}if(frame>=episode.frames.length-1)frame=0;playing=true;last=performance.now();elapsed=0;$('play').textContent='Ⅱ 暂停';requestAnimationFrame(tick);};
 function tick(t){if(!playing||!episode)return;elapsed+=(t-last)*Number($('speed').value);last=t;const step=1000/(episode.metadata.control_hz||summary.config.environment.control_hz);if(elapsed>=step){frame=Math.min(episode.frames.length-1,frame+Math.floor(elapsed/step));elapsed%=step;updateFrame();if(frame===episode.frames.length-1)stopped();}if(playing)requestAnimationFrame(tick);}
-$('open-labeled').onclick=async()=>{if(!summary?.label_groups?.length)return;$('search').value='';$('result-filter').value='all';$('group').value=summary.label_groups[0];await loadGroup();};
+$('open-labeled').onclick=async()=>{if(!summary?.label_groups?.length)return;$('search').value='';$('result-filter').value='all';$('labeled-only').checked=true;$('group').value=summary.label_groups[0];await loadGroup();};
 new ResizeObserver(()=>{drawScene();if(summary)drawHistory();if(episode)drawSignal();drawValuePanels();}).observe($('scene'));
 document.querySelectorAll('nav a').forEach(a=>a.onclick=()=>{document.querySelectorAll('nav a').forEach(x=>x.classList.toggle('active',x===a));});
 init();

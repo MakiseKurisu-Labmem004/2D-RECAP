@@ -3,7 +3,7 @@ import numpy as np
 import torch
 from torch import nn
 from .data import returns, split, atomic_json
-from .config import seed_all
+from .config import seed_all, validate_update_method
 
 
 def mlp(dim, out, c):
@@ -117,6 +117,8 @@ def warm_start(model, initial):
 
 
 def train(c, eps, output, kind, contract=None, initial=None, experts=None, labels=None, validate=None):
+    if kind == 'update':
+        validate_update_method(c['recap']['method'])
     if kind == 'value' and any(e['metadata'].get('source') == 'expert' for e in eps):
         raise ValueError('Unbounded expert returns are not finite-budget value targets')
     seed_all(c['seeds']['training'])

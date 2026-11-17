@@ -65,16 +65,21 @@ class Store:
         histories = {p.name.replace('.pt.history.json', ''): read_json(p) for p in sorted((run / 'checkpoints').glob('*.history.json'))}
         label_groups = ['rollouts/'+p.name for p in sorted((run/'labels').glob('round_*'))
                         if p.is_dir() and any(p.glob('*.npz')) and (run/'rollouts'/p.name).is_dir()]
-        return dict(name=name, groups=self.groups(run), label_groups=label_groups, metrics=read_json(run/'metrics.json', {}),
+        label_count = sum(1 for p in (run/'labels').rglob('*.npz') if p.is_file())
+        return dict(name=name, groups=self.groups(run), label_groups=label_groups, label_count=label_count, metrics=read_json(run/'metrics.json', {}),
                     histories=histories, config=config, manifest=read_json(run/'manifest.json', {}),
                     contract=read_json(run/'contract.json', {}), stages=[p.name.removesuffix('.done.json') for p in run.glob('*.done.json')])
 
     def episodes(self, name, group):
         run = self.run_path(name)
-        folder = inside(run, group)
+        folder = run if group == '__all__' else inside(run, group)
         result = []
-        for p in sorted(folder.glob('*.npz')):
+        paths = folder.rglob('*.npz') if group == '__all__' else folder.glob('*.npz')
+        for p in sorted(paths):
             if not p.resolve().is_relative_to(run):
+                continue
+            relative = p.relative_to(run)
+            if relative.parts[0] == 'labels':
                 continue
             stat = p.stat()
             key = str(p), stat.st_mtime_ns, stat.st_size
@@ -85,7 +90,11 @@ class Store:
                     meta = json.loads(str(f['metadata']))
                     self.cache[key] = dict(path=p.relative_to(run).as_posix(), metadata=meta,
                                            length=len(f['reward']), total_return=float(f['reward'].sum()))
-            result.append(self.cache[key])
+            row = dict(self.cache[key])
+            row['group'] = p.parent.relative_to(run).as_posix()
+            row['has_labels'] = (relative.parts[0] == 'rollouts' and
+                                 (run/'labels'/p.parent.name/(row['metadata']['episode_id']+'.npz')).is_file())
+            result.append(row)
         return result
 
     def episode(self, name, path):
@@ -104,6 +113,8 @@ class Store:
             for feature in config['observation']['features']:
                 columns[feature] = offset
                 offset += sizes[feature]
+            if obs.ndim != 2 or obs.shape[1] != offset:
+                raise ValueError('Observation width does not match resolved.yaml features')
             complete = meta.get('status') == 'complete' and len(reward) and bool(f['terminated'][-1]) and not f['truncated'].any()
             valid_return = bool(complete and not (meta.get('source') == 'expert' and not meta.get('success')))
             result = dict(metadata=meta, frames=frames, columns=columns, action=f['action'], reward=reward,

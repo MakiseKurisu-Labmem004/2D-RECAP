@@ -10,7 +10,9 @@ from minimal_recap.data import returns, freeze_contract, collect_episode, read_e
 
 @pytest.fixture
 def c():
-    return load('configs/experiments/smoke.yaml')
+    config = load('configs/experiments/smoke.yaml')
+    config['model']['device'] = 'cpu'  # Unit tests do not require server hardware.
+    return config
 
 
 def episode(rewards, terminal=True):
@@ -50,7 +52,7 @@ def test_contract_ordering(c, tmp_path):
 
 
 def test_model_has_six_hidden_layers(c):
-    net = Network(40, c['model'])
+    net = Network(34, c['model'])
     assert sum(isinstance(m, torch.nn.Linear) for m in net.net) == 7
 
 
@@ -137,7 +139,7 @@ def test_training_paths_and_resume(c, tmp_path):
     initial = train(c, eps[:2], tmp_path/'bc.pt', 'bc', contract)
     val = train(c, eps, tmp_path/'v.pt', 'value', contract)
     labels = {e['metadata']['episode_id']: np.ones(len(e['reward'])) for e in eps}
-    for method in ['conditioned', 'aggregate_bc', 'success_bc', 'unconditioned']:
+    for method in ['conditioned', 'aggregate_bc', 'success_bc']:
         config = merge(c, {'recap': {'method': method}})
         model = train(config, eps, tmp_path/f'{method}.pt', 'update', contract, initial=initial, experts=eps[:2], labels=labels)
         assert model.conditional == (method == 'conditioned')

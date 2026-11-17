@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=minimal-recap
 #SBATCH --cpus-per-task=16
+#SBATCH --gres=gpu:1
 #SBATCH --mem=32G
 #SBATCH --time=12:00:00
 #SBATCH --output=recap-%j.log

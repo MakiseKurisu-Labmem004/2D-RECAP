@@ -7,13 +7,11 @@ from .data import collect_episode, returns, atomic_json
 
 
 def suite_config(c, suite):
-    out = copy.deepcopy(c)
     if suite != 'id':
-        overrides = c['evaluation'].get('scenario_overrides', {})
-        if suite not in overrides:
-            raise ValueError(f'Unknown upright suite: {suite}')
-        out['environment'].update(copy.deepcopy(overrides[suite]))
-    return out
+        raise ValueError(f'Only the shared ID distribution is supported, got: {suite}')
+    if c['evaluation'].get('scenario_overrides'):
+        raise ValueError('Evaluation must use the shared environment ranges without scenario overrides')
+    return copy.deepcopy(c)
 
 
 def summarize(eps, hz):
@@ -55,7 +53,7 @@ def evaluate(c, model, contract, suite='id', validation=False, save_dir=None):
 
 def physics_check(c, output, count=12):
     results = {}
-    # Include all OOD geometries before reporting feasibility.
+    # Use the same scene distribution as collection, validation and evaluation.
     count = c['evaluation'].get('physics_episodes', count)
     suites = c['evaluation']['suites']
     for suite in suites:

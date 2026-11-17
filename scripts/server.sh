@@ -8,8 +8,9 @@ fi
 if [[ ! -x .venv/bin/python ]]; then
     uv venv --python 3.12 .venv
 fi
-uv pip install --python .venv/bin/python --torch-backend cpu -r requirements.txt
+uv pip install --python .venv/bin/python --torch-backend auto -r requirements.txt
 uv pip install --python .venv/bin/python --no-deps -e .
+.venv/bin/python -c "import torch; assert torch.cuda.is_available(), 'A CUDA-enabled PyTorch installation and an available NVIDIA GPU are required'"
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 .venv/bin/python -m pytest -q

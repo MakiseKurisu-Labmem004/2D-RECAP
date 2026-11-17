@@ -8,7 +8,7 @@ import shutil
 import numpy as np
 import torch
 import yaml
-from .config import load, seed_all, code_version, fingerprint
+from .config import load, seed_all, code_version, fingerprint, UPDATE_METHODS, validate_update_method
 from .tasks import make_env, make_expert
 from .data import atomic_json, collect_episode, episodes, read_episode, freeze_contract, returns
 from .learning import load_model, Behavior, train, advantages
@@ -141,6 +141,7 @@ class Runner:
 
     def update(self, round_id=0, method=None):
         method = method or self.c['recap']['method']
+        validate_update_method(method)
         from .config import merge
         c = merge(self.c, {'recap': {'method': method}})
         path = self.root/'checkpoints'/f'{method}_{round_id:02}.pt'
@@ -157,7 +158,7 @@ class Runner:
     def compare(self):
         self.require_contract()
         paths = {'initial_bc': self.root/'checkpoints/bc.pt'}
-        for method in ['aggregate_bc', 'success_bc', 'conditioned', 'unconditioned']:
+        for method in UPDATE_METHODS:
             paths[method] = self.update(method=method)
         self.evaluate(paths)
 

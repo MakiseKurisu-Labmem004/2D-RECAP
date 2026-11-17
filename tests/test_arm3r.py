@@ -8,7 +8,7 @@ def test_arm_joint_chain_limits_physical_grasp_and_release():
     c=load('configs/experiments/arm3r.yaml')
     env=make_env(c)
     obs,_=env.reset(seed=10000)
-    assert obs.shape==(40,)
+    assert obs.shape==(34,)
     assert env.action_space.shape==(4,)
     assert all(env.model.joint(n).type[0]==mujoco.mjtJoint.mjJNT_HINGE for n in ['shoulder','elbow','arm_wrist'])
     assert mujoco.mj_name2id(env.model,mujoco.mjtObj.mjOBJ_JOINT,'gx')==-1
@@ -25,7 +25,7 @@ def test_arm_joint_chain_limits_physical_grasp_and_release():
         if done:break
     assert done and info['success'] and grasped
     assert np.linalg.norm(env.data.qpos[env.arm_q]-initial)>0.3
-    assert not env.grasped() and env.hold==20
+    assert env.success_conditions() and env.hold==20
     for _ in range(40):
         env.done=False
         env.step([0,0,0,1])
@@ -54,3 +54,19 @@ def test_arm_ik_and_snapshot_replay():
     np.testing.assert_array_equal(e.data.qpos,before)
     assert e.ik_scale<1
     e.close()
+
+
+def test_observation_has_no_relative_features():
+    c=load('configs/experiments/arm3r.yaml')
+    assert c['observation']['features']==['gripper','object','goal','pedestal','geometry','arm']
+    e=make_env(c)
+    try:
+        obs,_=e.reset(seed=10000)
+        # Moving only the goal changes only its absolute x input; no relative
+        # position/error channels may carry another copy of that change.
+        scene=dict(e.scene,goal_x=e.scene['goal_x']+0.02)
+        shifted,_=e.reset(seed=10000,options={'scene':scene})
+        np.testing.assert_array_equal(np.flatnonzero(abs(shifted-obs)>1e-7),[16])
+        np.testing.assert_allclose(obs[28:31],e.data.qpos[e.arm_q],atol=1e-7)
+    finally:
+        e.close()

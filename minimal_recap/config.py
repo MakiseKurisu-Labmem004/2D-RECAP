@@ -10,6 +10,14 @@ import torch
 import yaml
 
 
+UPDATE_METHODS = ('aggregate_bc', 'success_bc', 'conditioned')
+
+
+def validate_update_method(method):
+    if method not in UPDATE_METHODS:
+        raise ValueError(f'Unsupported recap.method: {method!r}; choose one of {UPDATE_METHODS}')
+
+
 def merge(a, b):
     out = copy.deepcopy(a)
     for k, v in b.items():
@@ -22,8 +30,13 @@ def load(path):
     c = yaml.safe_load(path.read_text(encoding='utf-8'))
     parent = c.pop('extends', None)
     c = merge(load(path.parent / parent), c) if parent else c
+    validate_update_method(c['recap']['method'])
     if c['environment'].get('task') != 'pedestal_upright' or c['environment'].get('robot') != 'arm3r':
         raise ValueError('Only the arm3r pedestal_upright task is supported')
+    if c['environment'].get('success_rule') != 'stable_target':
+        raise ValueError('Expected success_rule: stable_target; use the current configuration and a new run')
+    if c['evaluation']['suites'] != ['id'] or c['evaluation'].get('scenario_overrides'):
+        raise ValueError('Use suites: [id] with shared environment ranges; evaluation scenario overrides are not supported')
     if c['reward']['gamma'] != 1 or c['reward']['step'] != -1 or c['reward']['success'] != 0:
         raise ValueError('This experiment contract requires gamma=1, step=-1, success=0')
     if c['expert_rollout']['max_control_steps'] is not None:

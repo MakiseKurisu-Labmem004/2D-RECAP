@@ -128,18 +128,18 @@ class UprightEnv(ManipulationEnv):
         groups.update(self.extra_observations())
         return np.concatenate([np.asarray(groups[k]) for k in self.cfg['observation']['features']]).astype(np.float32)
 
+    def in_target_region(self):
+        """Horizontal goal membership uses the object center, not its footprint."""
+        return bool(abs(self.block[0]-self.scene['goal_x']) <= self.c['target_half_width'])
+
     def success_conditions(self):
+        """Stable upright placement on the target tabletop; hand pose is irrelevant."""
         c = self.c
-        return bool(abs(self.block[0]-self.scene['goal_x']) < c['success_position_tolerance']
-                    and abs(self.block[0]-self.scene['goal_x'])+self.extent()[0] <= c['target_half_width']
+        return bool(self.in_target_region()
                     and abs(self.angle_error()) < c['success_angle_tolerance']
-                    and self.contact('object','table') and not self.contact('object','pedestal')
-                    and abs(self.block[1]-self.extent()[1]) < c['table_height_tolerance']
+                    and self.contact('object','table')
                     and np.linalg.norm(self.data.qvel[[self.v['ox'],self.v['oz']]]) < c['success_speed']
-                    and abs(self.data.qvel[self.v['angle']]) < c['success_angular_speed']
-                    and self.opening > c['block_thickness']+0.008
-                    and np.linalg.norm(self.grip-self.block) > c['release_clearance']
-                    and all(not self.contact('object',g) for g in ['lf','rf','palm']))
+                    and abs(self.data.qvel[self.v['angle']]) < c['success_angular_speed'])
 
     def step(self, action):
         if self.done:
@@ -316,7 +316,7 @@ class UprightExpert:
             if self.ticks >= cfg['release_steps'] and e.opening>c['max_opening']*0.9:
                 self.switch('wait')
         elif self.stage=='wait':
-            target = np.array([p[0],max(cfg['retreat_height'],c['block_length']+c['release_clearance'])])
-            if self.ticks > cfg['wait_steps'] and (abs(e.angle_error())>c['success_angle_tolerance'] or abs(b[0]-e.scene['goal_x'])>c['success_position_tolerance']):
+            target = np.array([p[0],max(cfg['retreat_height'],c['block_length']+cfg['retreat_clearance'])])
+            if self.ticks > cfg['wait_steps'] and (abs(e.angle_error())>c['success_angle_tolerance'] or not e.in_target_region()):
                 self.switch('open')
         return self.command(target,theta,opening)

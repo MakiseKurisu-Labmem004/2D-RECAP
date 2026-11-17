@@ -1,24 +1,21 @@
-# 当前3R任务验证记录
+# 统一 ID 分布验证
 
-日期：2026-11-17。环境：Windows、Python 3.12、MuJoCo 3.3.7、CPU。版本arm3r_upright_smooth_v1。
+日期：2026-11-17。本地环境：Windows、Python 3.12、MuJoCo 3.3.7，物理检查与单元测试使用CPU。默认实验训练配置仍为CUDA。
 
-## 实际验证
+数据版本：arm3r_upright_stable_target_no_relative_v2。奖励版本：arm3r_upright_stable_target_v1。成功规则：environment.success_rule=stable_target。
 
-- 当前27项回归测试均通过，覆盖接触抓取与稳定释放、关节与力矩限制、IK、开度平滑、状态恢复、任务超时/成功优先、aborted、MC与n步优势、分布bins、训练及checkpoint恢复、仪表盘数据和本地HTTP边界。HTTP测试需允许访问本机回环地址。
-- 15个YAML配置全部能解析，并指向同一个3R任务、四维动作接口。
-- 现有237步专家视频轨迹用清理后的代码逐步重算，40维观测最大差异为0，成功结果一致。
-- 当前物理抽检ID、短悬伸、高台座各12/12专家成功，长度234–244、235–246、238–247步。报告：runs/arm3r_gripper_smoothing_check/physics.json。
-- 当前视频：runs/arm3r_smooth_gripper_demo/rollout.mp4，237步仿真（11.85秒）、238帧、20fps。无掉落，一次抓取成功。
-- 完整3R冒烟流程已跑通：physics、expert、freeze、bc、rollout、value、label、update、next_rollout、evaluate、diagnose。目录runs/arm3r_smoke_validation。
-- 此冒烟运行采集6条专家，长度237、235、237、244、236、242步；C_fail=300、支持[-599,0]。每个网络只训练4次优化、每种策略仅2个ID场景，是工程验证。
+## 当前实际检查
 
-- initial_bc: ID 0%（2回合）；空抓恢复 0%，掉落恢复 0%。
-- conditioned: ID 0%（2回合）；空抓恢复 0%，掉落恢复 0%。
+- 统一范围：台座高12–19 cm、悬伸3.0–4.6 cm、目标x=12–20 cm，三个参数独立均匀采样，全部组合均可用于训练。评估仅保留id；恢复池单列诊断。
+- 30项相关测试通过，命令为`python -m pytest -q tests/test_upright.py tests/test_arm3r.py tests/test_success.py tests/test_contracts.py tests/test_gripper_motion.py`。覆盖真实抓取、旋转和稳定放置，简化成功规则、连续保持计数、关节/力矩/平滑器、状态恢复、MC/优势和三种更新方法。
+- 其中8个物理测试覆盖高度、悬伸量、目标位置上下界的全部交叉组合；均成功，并在成功后额外开爪观察40步验证稳定性。这些是边界物理检查，不是额外评估分组。
+- 14份YAML均解析为统一范围、suites=[id]、34维无相对观测和CUDA默认。旧独立套件名或非空scenario_overrides会明确报错。
+- 每个阶段抽取64个场景种子检查采样覆盖：expert、rollout、validation、evaluation均包含高台座、短悬伸及二者组合；这是reset采样检查，不是256条任务成功率实验。
+- 使用正式arm3r配置执行physics阶段，12/12条专家成功，长度198–210步。记录位于runs/arm3r_all_id_check/physics.json，同目录保存resolved.yaml、manifest.json和阶段记录。
+- 仪表盘移除预置外推选项，JavaScript语法检查通过。现有历史run仍按自己的记录显示，不修改历史指标。
 
-仪表盘已使用40维特征映射、四维动作、台座和旋转长方体及3R关节链示意。前端JavaScript语法检查通过。
+成功只表示桌面目标区内稳定竖直，允许夹爪仍接触或夹持；不代表已经独立释放。之前较窄采样范围的物理检查保存在runs/arm3r_stable_target_check/，它属于数据v1，不作为当前统一分布的正式结果。
 
-## 尚未验证
+## 解释边界
 
-没有完成正式多种子BC/RECAP性能实验、完整组合OOD、所有边界布局或全部掉落池的可恢复性验证。没有证明RECAP优于BC。Linux/CUDA训练吞吐量尚未实测。当前的物理成功率和极小预算训练成绩不能互相替代。
-
-正式实验前按详细设计完成预算审计、数据划分和公平比较；只使用ID验证选择checkpoint，OOD不参与选择。
+这些是有限场景的物理检查和小规模训练路径测试，不能证明连续范围内所有状态都可解。尚未完成统一分布下正式多训练种子的BC、Value、RECAP实验或服务器CUDA性能验证，未证明RECAP优于BC或所有掉落状态都可恢复。场景分布已变更，需新建run重新采专家并冻结contract后执行正式比较；奖励规则没有变化，不改写历史数据或标签。

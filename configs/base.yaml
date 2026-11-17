@@ -33,10 +33,11 @@ environment:
   max_delta: 0.01
   grip_kp: 500
   grip_force: 12
-  target_half_width: 0.04
+  target_half_width: 0.04  # Object center within +/-4 cm of the goal.
   success_speed: 0.015
   success_angular_speed: 0.15
   success_hold_steps: 20
+  success_rule: stable_target
   task: pedestal_upright
   block_length: 0.12
   block_width: 0.04
@@ -44,11 +45,12 @@ environment:
   pedestal_edge: -0.1
   pedestal_width: 0.16
   pedestal_depth: 0.1
+  # Shared ID ranges: sampled independently for collection, validation and testing.
   pedestal_height:
   - 0.12
-  - 0.15
+  - 0.19
   overhang:
-  - 0.038
+  - 0.03
   - 0.046
   goal_x:
   - 0.12
@@ -61,10 +63,7 @@ environment:
   wrist_range:
   - -1.8
   - 1.8
-  success_position_tolerance: 0.012
   success_angle_tolerance: 0.08726646259971647
-  release_clearance: 0.1
-  table_height_tolerance: 0.004
   robot: arm3r
   render_width: 1280
   render_height: 720
@@ -115,12 +114,12 @@ environment:
     max_acceleration: 0.4
     response_time: 0.2
 observation:
+  # 34 numerical inputs; no engineered relative position/orientation features.
   features:
   - gripper
   - object
   - goal
   - pedestal
-  - relative
   - geometry
   - arm
   normalize: true
@@ -129,10 +128,10 @@ reward:
   step: -1
   success: 0
   failure_cost: auto
-  version: arm3r_upright_smooth_v1
+  version: arm3r_upright_stable_target_v1
   support: auto
 model:
-  device: cpu
+  device: cuda
   hidden_layers: 6
   hidden_units: 128
   activation: relu
@@ -152,6 +151,7 @@ expert_rollout:
   probe_steps: 16
   release_steps: 12
   retreat_height: 0.24
+  retreat_clearance: 0.1  # Expert retreat only; not a success condition.
   wait_steps: 50
   reacquire_height: 0.12
   grip_settle_speed: 0.005
@@ -166,7 +166,7 @@ policy_rollout:
     - 0.04
     - 0.04
 dataset:
-  version: arm3r_upright_smooth_v1
+  version: arm3r_upright_stable_target_no_relative_v2
   validation_fraction: 0.15
   mixing: all_rounds
 bc_training:
@@ -204,8 +204,6 @@ evaluation:
     - 0
   suites:
   - id
-  - overhang_short
-  - pedestal_high
   pool_size: 10
   diagnostic_offsets:
   - -0.012
@@ -215,15 +213,6 @@ evaluation:
   - 0.012
   diagnostic_repeats: 1
   diagnostic_prefix_steps: 10
-  scenario_overrides:
-    overhang_short:
-      overhang:
-      - 0.03
-      - 0.035
-    pedestal_high:
-      pedestal_height:
-      - 0.17
-      - 0.19
   physics_episodes: 12
   physics_guard_steps: 1200
   diagnostic_axis: z

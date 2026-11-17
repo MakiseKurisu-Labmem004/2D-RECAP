@@ -52,7 +52,7 @@ def test_physical_gripper_speed_and_mid_ramp_resume(monkeypatch):
         # Dynamic response can slightly exceed reference speed; never clamp qvel.
         assert max(velocities) < .075
         assert e.opening > .02
-        assert e.obs().shape == (40,)
+        assert e.obs().shape == (34,)
         # Missing hidden controller state must not silently resume a different motion.
         invalid=copy.deepcopy(state)
         del invalid['gripper_motion']
