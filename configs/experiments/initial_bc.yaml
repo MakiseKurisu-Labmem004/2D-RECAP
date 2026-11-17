@@ -1,0 +1,14 @@
+extends: arm3r.yaml
+run:
+  name: initial_bc_50k
+  stages: [physics, expert, freeze, bc, evaluate]
+bc_training:
+  # An epoch is a block of sampled optimizer updates, not a full data pass.
+  epochs: 1000
+  updates_per_epoch: 50       # 1000 * 50 = 50,000 gradient steps.
+  batch_size: 256
+  validation_every: 50        # 50 * 50 = 2,500 gradient steps; 20 evaluations.
+  validation_episodes: 100    # Same independent ID validation seeds each time.
+  save_validation_checkpoints: true
+  export_curves: true
+  log_progress: true

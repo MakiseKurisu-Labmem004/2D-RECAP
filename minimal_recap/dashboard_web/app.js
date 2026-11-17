@@ -201,8 +201,9 @@ function drawValueComparison(id){
 }
 function drawHistory(){
   const history=summary?.histories[$('history').value]||[];
-  chart('loss-chart',[{name:'Train loss',points:history.map(h=>[h.epoch,h.train_loss])},{name:'Validation loss',points:history.map(h=>[h.epoch,h.validation_loss])}],{xlabel:'epoch'});
-  chart('validation-chart',[{name:'ID success %',points:history.map(h=>[h.epoch,h.id_validation?.success_rate==null?null:h.id_validation.success_rate*100])}],{xlabel:'epoch',range:[0,100]});
+  const useSteps=history.length>0&&history.every(h=>h.gradient_step!=null), x=h=>useSteps?h.gradient_step:h.epoch, xlabel=useSteps?'gradient step':'epoch';
+  chart('loss-chart',[{name:'Train loss',points:history.map(h=>[x(h),h.train_loss])},{name:'Validation loss',points:history.map(h=>[x(h),h.validation_loss])}],{xlabel});
+  chart('validation-chart',[{name:'ID success %',points:history.map(h=>[x(h),h.id_validation?.success_rate==null?null:h.id_validation.success_rate*100])}],{xlabel,range:[0,100]});
 }
 function drawMetrics(){
   const key=$('distribution').value;

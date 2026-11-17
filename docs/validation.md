@@ -19,3 +19,13 @@
 ## 解释边界
 
 这些是有限场景的物理检查和小规模训练路径测试，不能证明连续范围内所有状态都可解。尚未完成统一分布下正式多训练种子的BC、Value、RECAP实验或服务器CUDA性能验证，未证明RECAP优于BC或所有掉落状态都可恢复。场景分布已变更，需新建run重新采专家并冻结contract后执行正式比较；奖励规则没有变化，不改写历史数据或标签。
+
+## initial_bc长训练入口与曲线验证
+
+新增configs/experiments/initial_bc.yaml：50,000次梯度更新、batch 256，每2,500步验证100个固定ID场景，共20个评估点。本机PyTorch为2.7.1+cpu，尚未执行正式CUDA的50,000步实验。
+
+- 24项相关测试通过，命令为`python -m pytest -q tests/test_training_schedule.py tests/test_contracts.py tests/test_upright.py`。覆盖训练中断后续跑、评估间隔不漂移、历史不重复、最佳与最终checkpoint区分、未验证处保持缺失值，以及MC/优势和各训练路径。
+- 用相同随机种子比较中断续跑与连续训练，最终模型所有参数和缓冲区逐位相同；已完成训练再次调用不追加评估点。
+- 真实小预算BC流程保存在runs/initial_bc_curve_check/：6条成功专家、12次更新，在第6/12步各评估2个ID场景，均为0/2成功。这仅验证记录和导出，不用于判断BC性能。
+- plots/bc/loss.png、success_rate.png和curves.csv已生成并检查；独立training_plots命令可从日志重新生成。正式配置的20个验证步为2500、5000、…、50000，loss日志每50步记录一次。
+- 仪表盘可按gradient_step显示训练横轴，并兼容仅含epoch的旧日志。JavaScript语法检查通过。

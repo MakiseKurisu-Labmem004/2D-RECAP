@@ -192,24 +192,48 @@ def train(c, eps, output, kind, contract=None, initial=None, experts=None, label
         with torch.no_grad():
             val_loss = float(loss(VX, VY, VC))
         score = val_loss
-        row = {'epoch': epoch+1, 'train_loss': float(np.mean(losses)), 'validation_loss': val_loss}
+        gradient_step = (epoch+1)*section['updates_per_epoch']
+        row = {'epoch': epoch+1, 'gradient_step': gradient_step,
+               'train_loss': float(np.mean(losses)), 'validation_loss': val_loss}
         eligible = True
         if validate:
             eligible = (epoch+1) % section.get('validation_every', 1) == 0 or epoch+1 == section['epochs']
             if eligible:
+                if section.get('log_progress', False):
+                    print(f'{kind} step={gradient_step}: evaluating ID validation scenes', flush=True)
                 metrics = validate(model)
                 row['id_validation'] = metrics
                 score = -metrics['success_rate'] + val_loss*1e-5
+        metadata = {'kind': kind, 'epoch': epoch+1, 'gradient_step': gradient_step, 'contract': contract,
+                    'training_episodes': [e['metadata']['episode_id'] for e in tr],
+                    'validation_episodes': [e['metadata']['episode_id'] for e in va],
+                    'mixing': c['dataset']['mixing'], 'method': method if kind == 'update' else kind}
+        if 'id_validation' in row:
+            metadata['id_validation'] = row['id_validation']
+            if section.get('save_validation_checkpoints', False):
+                checkpoint = Path(output).parent / f'{Path(output).stem}_steps' / f'step_{gradient_step:06}.pt'
+                checkpoint.parent.mkdir(exist_ok=True)
+                save_model(checkpoint, model, metadata)
+                row['validation_checkpoint'] = checkpoint.relative_to(Path(output).parent).as_posix()
         history.append(row)
         if eligible and score < best:
             best = score
-            save_model(output, model, {'kind': kind, 'epoch': epoch+1, 'contract': contract,
-                                       'training_episodes': [e['metadata']['episode_id'] for e in tr],
-                                       'validation_episodes': [e['metadata']['episode_id'] for e in va],
-                                       'mixing': c['dataset']['mixing'], 'method': method if kind == 'update' else kind})
+            save_model(output, model, metadata)
         temporary = resume_path.with_suffix('.tmp')
         torch.save({'model': model.state_dict(), 'optimizer': optimizer.state_dict(), 'rng': rng.bit_generator.state,
-                    'torch_rng': torch.get_rng_state(), 'best': best, 'history': history, 'epoch': epoch+1}, temporary)
+                    'torch_rng': torch.get_rng_state(), 'best': best, 'history': history,
+                    'epoch': epoch+1, 'gradient_step': gradient_step}, temporary)
         temporary.replace(resume_path)
         atomic_json(str(output)+'.history.json', history)
+        if section.get('log_progress', False):
+            success = f' id_success={row["id_validation"]["success_rate"]:.1%}' if 'id_validation' in row else ''
+            print(f'{kind} step={gradient_step}/{section["epochs"]*section["updates_per_epoch"]}'
+                  f' train_loss={row["train_loss"]:.6f} validation_loss={val_loss:.6f}{success}', flush=True)
+        if section.get('export_curves', False) and 'id_validation' in row:
+            from .training_plots import export_training_curves
+            export_training_curves(history, Path(output).parent.parent/'plots'/Path(output).stem, section['updates_per_epoch'])
+    # Also reconstruct plots when resuming an already-completed training file.
+    if section.get('export_curves', False):
+        from .training_plots import export_training_curves
+        export_training_curves(history, Path(output).parent.parent/'plots'/Path(output).stem, section['updates_per_epoch'])
     return load_model(output)

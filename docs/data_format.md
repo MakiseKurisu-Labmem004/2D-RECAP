@@ -30,3 +30,7 @@ status=complete只表示完整任务终止；程序异常/取消保存为aborted
 当前成功定义为桌面目标区内稳定竖直，不要求张爪或撤离。成功时刻与旧定义不同，即使每步奖励数值相同，MC回报和优势标签也不同；必须按新的数据/奖励版本采集并冻结contract，不与旧判定的数据混用。
 
 v2将台座高度12–19 cm、悬伸3.0–4.6 cm、目标x=12–20 cm作为统一ID范围，独立均匀采样，所有组合均可用于训练。评估只产生id分组与恢复诊断；数据版本变更用于区分旧采样协议，奖励和成功规则沿用stable_target_v1。旧轨迹、checkpoint及恢复池不自动混入新run，需重新采集并冻结contract。
+
+训练日志`checkpoints/*.pt.history.json`每条记录包含epoch、gradient_step、train_loss和validation_loss。gradient_step是已完成的优化器更新次数，train_loss是当前epoch更新块内小批量loss的均值；validation_loss来自留出的完整轨迹。只有实际执行策略验证的记录才有id_validation及可选的validation_checkpoint（相对checkpoints目录）。不将未验证的步填成0成功率。
+
+`initial_bc.yaml`每50步记录一次loss并保存续跑状态，每2500步验证100个固定ID场景并保存`bc_steps/step_NNNNNN.pt`，各模型元数据包含gradient_step与对应id_validation。`bc.pt`为验证选出的最佳模型，`bc.pt.training.pt`为最新续跑状态。`plots/bc/`导出loss.png、success_rate.png和curves.csv；图中成功率为百分比，JSON/CSV中为0–1。最终独立测试另存metrics.json，不混入用于选模型的验证曲线。
