@@ -11,7 +11,7 @@ export MKL_NUM_THREADS=1
 # No OpenGL required unless exporting replay images. On EGL-capable hosts:
 # export MUJOCO_GL=egl
 # Prepare the uv environment on a login/setup node before submitting.
-config="${1:-configs/experiments/server_cpu.yaml}"
+config="${1:-configs/experiments/arm3r.yaml}"
 if (( $# > 0 )); then
     shift
 fi

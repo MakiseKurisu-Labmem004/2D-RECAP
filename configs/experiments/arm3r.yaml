@@ -1,0 +1,2 @@
+extends: ../base.yaml
+run: {name: arm3r_upright_smooth}

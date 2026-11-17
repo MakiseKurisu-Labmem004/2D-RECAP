@@ -1,44 +1,135 @@
 run:
-  stages: [physics, expert, freeze, bc, rollout, value, label, update, next_rollout, evaluate, diagnose]
+  stages:
+  - physics
+  - expert
+  - freeze
+  - bc
+  - rollout
+  - value
+  - label
+  - update
+  - next_rollout
+  - evaluate
+  - diagnose
   output: runs
-  name: minimal
+  name: arm3r_upright_smooth
 environment:
-  gravity: [0, 0, -9.81]
-  block_size: 0.04
-  block_mass: 0.06
+  gravity:
+  - 0
+  - 0
+  - -9.81
+  block_mass: 0.08
   lock_rotation: false
   max_opening: 0.08
-  finger_length: 0.06
+  finger_length: 0.03
   finger_thickness: 0.008
   friction: 1.5
-  wall_width: 0.04
-  wall_height: [0.06, 0.10]
-  workspace_x: [-0.30, 0.30]
-  max_height: 0.35
+  workspace_x:
+  - -0.35
+  - 0.35
+  max_height: 0.45
   timestep: 0.0025
   control_hz: 20
   max_delta: 0.01
-  servo_kp: 1500
-  servo_kv: 70
-  servo_force: 80
   grip_kp: 500
   grip_force: 12
-  target_half_width: 0.045
-  success_speed: 0.025
-  success_angular_speed: 0.3
-  success_hold_steps: 6
-  layout: [near_near, near_far, far_near]
-  near: [0.12, 0.16]
-  far: [0.20, 0.24]
+  target_half_width: 0.04
+  success_speed: 0.015
+  success_angular_speed: 0.15
+  success_hold_steps: 20
+  task: pedestal_upright
+  block_length: 0.12
+  block_width: 0.04
+  block_thickness: 0.04
+  pedestal_edge: -0.1
+  pedestal_width: 0.16
+  pedestal_depth: 0.1
+  pedestal_height:
+  - 0.12
+  - 0.15
+  overhang:
+  - 0.038
+  - 0.046
+  goal_x:
+  - 0.12
+  - 0.2
+  target_angle: -1.5707963267948966
+  initial_wrist_angle: 1.5707963267948966
+  initial_approach_gap: 0.08
+  min_height: 0.025
+  max_angle_delta: 0.05235987755982989
+  wrist_range:
+  - -1.8
+  - 1.8
+  success_position_tolerance: 0.012
+  success_angle_tolerance: 0.08726646259971647
+  release_clearance: 0.1
+  table_height_tolerance: 0.004
+  robot: arm3r
+  render_width: 1280
+  render_height: 720
+  arm_base:
+  - 0.38
+  - 0.08
+  arm_lengths:
+  - 0.3
+  - 0.28
+  - 0.07
+  arm_radii:
+  - 0.021
+  - 0.018
+  - 0.014
+  arm_masses:
+  - 0.8
+  - 0.5
+  - 0.12
+  arm_joint_ranges:
+  - - -2.5
+    - 2.5
+  - - -2.8
+    - -0.15
+  - - -2.9
+    - 2.9
+  arm_kp:
+  - 800
+  - 600
+  - 250
+  arm_kv:
+  - 35
+  - 30
+  - 12
+  arm_torque:
+  - 18
+  - 12
+  - 4
+  arm_armature:
+  - 0.02
+  - 0.015
+  - 0.005
+  arm_max_joint_delta: 0.12
+  arm_gravity_compensation: true
+  arm_ik_backtracks: 10
+  grip_kv: 8
+  gripper_motion:
+    max_speed: 0.06
+    max_acceleration: 0.4
+    response_time: 0.2
 observation:
-  features: [gripper, object, goal, wall, relative]
+  features:
+  - gripper
+  - object
+  - goal
+  - pedestal
+  - relative
+  - geometry
+  - arm
   normalize: true
 reward:
   gamma: 1.0
   step: -1
   success: 0
   failure_cost: auto
-  version: v1
+  version: arm3r_upright_smooth_v1
   support: auto
 model:
   device: cpu
@@ -52,14 +143,30 @@ expert_rollout:
   max_control_steps: null
   max_attempts: 10000
   close_steps: 12
-  lift_probe: 0.035
-  clearance: 0.015
+  lift_probe: 0.025
+  stage_guard_steps: 400
+  grasp_depth: 0.012
+  position_tolerance: 0.003
+  angle_tolerance: 0.025
+  rotation_clearance: 0.04
+  probe_steps: 16
+  release_steps: 12
+  retreat_height: 0.24
+  wait_steps: 50
+  reacquire_height: 0.12
+  grip_settle_speed: 0.005
 policy_rollout:
   episodes: 200
-  max_control_steps: 200
-  exploration: {mode: none, std: [0.08, 0.08, 0.04]}
+  max_control_steps: 300
+  exploration:
+    mode: none
+    std:
+    - 0.06
+    - 0.06
+    - 0.04
+    - 0.04
 dataset:
-  version: v1
+  version: arm3r_upright_smooth_v1
   validation_fraction: 0.15
   mixing: all_rounds
 bc_training:
@@ -87,13 +194,42 @@ recap:
   rounds: 1
 evaluation:
   episodes: 100
-  max_control_steps: 200
-  exploration: {mode: none, std: [0, 0, 0]}
-  suites: [id, combination, height_1, height_2]
+  max_control_steps: 300
+  exploration:
+    mode: none
+    std:
+    - 0
+    - 0
+    - 0
+    - 0
+  suites:
+  - id
+  - overhang_short
+  - pedestal_high
   pool_size: 10
-  diagnostic_offsets: [-0.04, -0.02, 0, 0.02, 0.04]
+  diagnostic_offsets:
+  - -0.012
+  - -0.006
+  - 0
+  - 0.006
+  - 0.012
   diagnostic_repeats: 1
   diagnostic_prefix_steps: 10
+  scenario_overrides:
+    overhang_short:
+      overhang:
+      - 0.03
+      - 0.035
+    pedestal_high:
+      pedestal_height:
+      - 0.17
+      - 0.19
+  physics_episodes: 12
+  physics_guard_steps: 1200
+  diagnostic_axis: z
+  recovery_empty_offset: 0.05
+  recovery_empty_steps: 24
+  recovery_drop_steps: 12
 seeds:
   training: 1
   expert: 10000

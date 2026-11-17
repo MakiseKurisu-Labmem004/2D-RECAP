@@ -22,6 +22,8 @@ def load(path):
     c = yaml.safe_load(path.read_text(encoding='utf-8'))
     parent = c.pop('extends', None)
     c = merge(load(path.parent / parent), c) if parent else c
+    if c['environment'].get('task') != 'pedestal_upright' or c['environment'].get('robot') != 'arm3r':
+        raise ValueError('Only the arm3r pedestal_upright task is supported')
     if c['reward']['gamma'] != 1 or c['reward']['step'] != -1 or c['reward']['success'] != 0:
         raise ValueError('This experiment contract requires gamma=1, step=-1, success=0')
     if c['expert_rollout']['max_control_steps'] is not None:
@@ -40,8 +42,24 @@ def load(path):
             raise ValueError('Training budgets must be positive')
     for section in ['policy_rollout', 'evaluation']:
         exploration = c[section]['exploration']
-        if exploration['mode'] not in ['none', 'gaussian'] or len(exploration['std']) != 3 or min(exploration['std']) < 0:
+        if exploration['mode'] not in ['none', 'gaussian'] or len(exploration['std']) != 4 or min(exploration['std']) < 0:
             raise ValueError('Invalid exploration specification')
+    if c['environment'].get('task') == 'pedestal_upright':
+        e = c['environment']
+        if e['lock_rotation']:
+            raise ValueError('Cannot lock object rotation in upright task')
+        if not 0 < e['overhang'][0] <= e['overhang'][1] < e['block_length']/2:
+            raise ValueError('Initial block center of mass must remain on the pedestal')
+        if e['max_opening'] <= e['block_thickness'] + 2*e['finger_thickness']:
+            raise ValueError('Insufficient gripper opening for side approach')
+    if c['environment'].get('gripper_motion') is not None:
+        from .gripper import GripperMotion
+        e = c['environment']
+        if e.get('task') != 'pedestal_upright':
+            raise ValueError('Gripper motion governor currently requires pedestal_upright')
+        GripperMotion(e['gripper_motion'], e['max_opening'], e['max_opening'], e['timestep'])
+        if not np.isfinite(e.get('grip_kv',3)) or e.get('grip_kv',3) <= 0:
+            raise ValueError('grip_kv must be positive and finite')
     return c
 
 

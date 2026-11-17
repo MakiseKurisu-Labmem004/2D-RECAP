@@ -1,2 +1,2 @@
-extends: ../base.yaml
+extends: arm3r.yaml
 run: {name: recap}

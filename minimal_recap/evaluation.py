@@ -1,22 +1,18 @@
 import copy
 import numpy as np
 import torch
-from .env import PlanarGraspEnv
-from .expert import Expert
+from .tasks import make_env, make_expert
 from .learning import Behavior, advantages
 from .data import collect_episode, returns, atomic_json
 
 
 def suite_config(c, suite):
     out = copy.deepcopy(c)
-    if suite == 'combination':
-        out['environment']['layout'] = ['far_far']
-    elif suite == 'height_1':
-        out['environment']['wall_height'] = [0.11, 0.12]
-    elif suite == 'height_2':
-        out['environment']['wall_height'] = [0.13, 0.14]
-    elif suite != 'id':
-        raise ValueError(suite)
+    if suite != 'id':
+        overrides = c['evaluation'].get('scenario_overrides', {})
+        if suite not in overrides:
+            raise ValueError(f'Unknown upright suite: {suite}')
+        out['environment'].update(copy.deepcopy(overrides[suite]))
     return out
 
 
@@ -29,11 +25,15 @@ def summarize(eps, hz):
     z, den = 1.96, 1+1.96**2/max(n, 1)
     center = (p+z*z/(2*max(n, 1)))/den
     half = z*np.sqrt(p*(1-p)/max(n, 1)+z*z/(4*max(n, 1)**2))/den
-    return {'episodes': n, 'success_rate': p, 'success_ci95': [center-half, center+half],
+    summary = {'episodes': n, 'success_rate': p, 'success_ci95': [center-half, center+half],
             'first_grasp_success_rate': float(np.mean([m.get('first_grasp_success', False) for m in meta])) if n else 0.,
             'mean_regrasps': float(np.mean([m.get('regrasps', 0) for m in meta])) if n else 0.,
             'success_completion_seconds': float(np.mean([len(e['reward'])/hz for e in eps if e['metadata']['success']])) if success.sum() else None,
             'mean_return': float(np.mean([returns(e)[0] for e in eps])) if n else None}
+    if meta and all('tilt_error' in m for m in meta):
+        summary['mean_terminal_tilt_error_rad'] = float(np.mean([m['tilt_error'] for m in meta]))
+        summary['mean_terminal_position_error_m'] = float(np.mean([m['position_error'] for m in meta]))
+    return summary
 
 
 def evaluate(c, model, contract, suite='id', validation=False, save_dir=None):
@@ -41,7 +41,7 @@ def evaluate(c, model, contract, suite='id', validation=False, save_dir=None):
     seed = c['seeds']['validation'] if validation else c['seeds']['evaluation']
     count = c['bc_training']['validation_episodes'] if validation else c['evaluation']['episodes']
     eps = []
-    env = PlanarGraspEnv(config, c['evaluation']['max_control_steps'], contract['failure_cost'])
+    env = make_env(config, c['evaluation']['max_control_steps'], contract['failure_cost'])
     try:
         for i in range(count):
             ep = collect_episode(env, Behavior(model, c['evaluation']['exploration'], seed+i), seed+i,
@@ -56,16 +56,17 @@ def evaluate(c, model, contract, suite='id', validation=False, save_dir=None):
 def physics_check(c, output, count=12):
     results = {}
     # Include all OOD geometries before reporting feasibility.
-    for suite in ['id', 'combination', 'height_1', 'height_2']:
+    count = c['evaluation'].get('physics_episodes', count)
+    suites = c['evaluation']['suites']
+    for suite in suites:
         cfg = suite_config(c, suite)
-        cfg['environment']['layout'] = ['near_near', 'near_far', 'far_near'] if suite == 'id' else cfg['environment']['layout']
         rows = []
-        env = PlanarGraspEnv(cfg, None)
+        env = make_env(cfg, None)
         for i in range(count):
             obs, _ = env.reset(seed=c['seeds']['expert']+i)
-            expert = Expert(env)
+            expert = make_expert(env)
             # Validation guard is an explicit exception, never an expert task deadline.
-            for t in range(1200):
+            for t in range(c['evaluation'].get('physics_guard_steps', 1200)):
                 obs, _, term, _, info = env.step(expert(obs))
                 if term:
                     break
@@ -83,22 +84,24 @@ def physics_check(c, output, count=12):
 def make_recovery_pool(c, contract, output):
     states = []
     for mode in ['empty', 'drop']:
-        env = PlanarGraspEnv(c, c['evaluation']['max_control_steps'], contract['failure_cost'])
+        env = make_env(c, c['evaluation']['max_control_steps'], contract['failure_cost'])
         for i in range(c['evaluation']['pool_size']):
             seed = c['seeds']['diagnostics']+i
             obs, _ = env.reset(seed=seed)
-            expert = Expert(env)
+            expert = make_expert(env)
             injected = 0
             for t in range(c['evaluation']['max_control_steps']):
                 action = expert(obs)
-                if mode == 'empty' and expert.stage in ['descend', 'close', 'probe']:
-                    action[0] = np.clip((env.scene['object_x']+0.06-env.grip[0])/env.c['max_delta'], -1, 1)
+                if mode == 'empty' and (expert.stage in ['approach', 'close', 'probe'] or injected):
+                    action = np.array([0., np.clip((env.scene['pedestal_height']+env.c['block_thickness']/2+c['evaluation']['recovery_empty_offset']-env.grip[1])/env.c['max_delta'],-1,1),0.,-1.])
                     injected += 1
-                if mode == 'drop' and (expert.stage == 'transport' or injected > 0):
-                    action = np.array([0., 0., 1.])
+                if mode == 'drop' and (expert.stage == 'transport' or injected):
+                    action = np.array([0.,0.,0.,1.])
                     injected += 1
                 obs, _, done, _, _ = env.step(action)
-                ready = (mode == 'empty' and injected >= 20 and not env.grasped()) or (mode == 'drop' and injected >= 8 and not env.grasped())
+                empty_steps = c['evaluation'].get('recovery_empty_steps',20)
+                drop_steps = c['evaluation'].get('recovery_drop_steps',8)
+                ready = (mode == 'empty' and injected >= empty_steps and not env.grasped()) or (mode == 'drop' and injected >= drop_steps and not env.grasped())
                 if ready and not done:
                     states.append({'mode': mode, 'state': env.snapshot(), 'controller': {'expert': expert.state_dict(), 'perturbation': {'mode': mode, 'injected_steps': injected}},
                                    'remaining_budget': env.budget-env.steps})
@@ -119,7 +122,7 @@ def evaluate_pool(c, model, contract, pool):
         for i, item in enumerate(pool):
             if item['mode'] != mode:
                 continue
-            env = PlanarGraspEnv(c, c['evaluation']['max_control_steps'], contract['failure_cost'])
+            env = make_env(c, c['evaluation']['max_control_steps'], contract['failure_cost'])
             policy = Behavior(model, c['evaluation']['exploration'], c['seeds']['evaluation']+i)
             resume = {k: [] for k in ['observation', 'action', 'reward', 'next_observation', 'terminated', 'truncated']}
             resume.update(states=[item['state']], controller_states=[], metadata={'episode_id': f'pool_{i}', 'source': 'recovery', 'status': 'active'})
@@ -132,9 +135,9 @@ def evaluate_pool(c, model, contract, pool):
 
 
 def pregrasp_state(c, contract):
-    env = PlanarGraspEnv(c, c['evaluation']['max_control_steps'], contract['failure_cost'])
+    env = make_env(c, c['evaluation']['max_control_steps'], contract['failure_cost'])
     obs, _ = env.reset(seed=c['seeds']['diagnostics'])
-    expert = Expert(env)
+    expert = make_expert(env)
     for _ in range(env.budget):
         action = expert(obs)
         if expert.stage == 'close':
@@ -182,20 +185,28 @@ def diagnostics(c, policy, value, contract, output):
         return total, estimated, env.steps-start
     for offset in c['evaluation']['diagnostic_offsets']:
         env.restore(base)
-        target_x = env.grip[0]+offset
+        axis = {'x': 0, 'z': 1}[c['evaluation'].get('diagnostic_axis', 'x')]
+        target_x = env.grip[axis]+offset
         # Reach offsets via physical action, so every tested state is dynamically valid.
         for _ in range(8):
-            env.step([np.clip((target_x-env.grip[0])/env.c['max_delta'], -1, 1), 0, 1])
+            action = np.zeros(env.action_space.shape)
+            action[-1] = 1
+            action[axis] = np.clip((target_x-env.grip[axis])/env.c['max_delta'],-1,1)
+            env.step(action)
         state = env.snapshot()
         if env.done:
             raise RuntimeError('Diagnostic setup exhausted budget')
         observed = [continue_return(state, repeat=j)[0] for j in range(repeats)]
         env.restore(state)
-        rows.append({'offset': offset, 'actual_offset': float(env.grip[0]-env.block[0]), 'state': state, 'value': v(env.obs()), 'return_mean': float(np.mean(observed)),
+        rows.append({'offset': offset, 'actual_offset': float(env.grip[axis]-env.block[axis]), 'state': state, 'value': v(env.obs()), 'return_mean': float(np.mean(observed)),
                      'return_std': float(np.std(observed)), 'independent_continuations': repeats})
-        for direction, name in [(0, 'direct'), (-np.sign(offset), 'correct'), (np.sign(offset), 'wrong')]:
+        actual_sign = np.sign(env.grip[axis]-env.block[axis])
+        for direction, name in [(0, 'direct'), (-actual_sign, 'correct'), (actual_sign, 'wrong')]:
             def prefix(t):
-                return [direction if t < 4 else 0, 0, 1 if t < 4 else -1]
+                action = np.zeros(env.action_space.shape)
+                action[axis] = direction*min(1.,abs(offset)/(4*env.c['max_delta'])) if t < 4 else 0
+                action[-1] = 1 if t < 4 else -1
+                return action
             samples = [continue_return(state, prefix, j) for j in range(repeats)]
             rank_rows.append({'offset': offset, 'fragment': name, 'return_mean': float(np.mean([x[0] for x in samples])),
                               'estimated_advantage': samples[0][1], 'prefix_steps': c['evaluation']['diagnostic_prefix_steps']})
@@ -214,7 +225,7 @@ def diagnostics(c, policy, value, contract, output):
     fig, ax = plt.subplots(figsize=(7, 4))
     ax.plot([r['offset'] for r in rows], [r['value'] for r in rows], 'o-', label='Value')
     ax.errorbar([r['offset'] for r in rows], [r['return_mean'] for r in rows], yerr=[r['return_std'] for r in rows], label='reference continuation')
-    ax.legend(); ax.set_xlabel('physical horizontal offset (m)'); fig.tight_layout(); fig.savefig(output/'offsets.png'); plt.close(fig)
+    ax.legend(); ax.set_xlabel(f'physical {c["evaluation"].get("diagnostic_axis", "x")} offset (m)'); fig.tight_layout(); fig.savefig(output/'offsets.png'); plt.close(fig)
     pairs = []
     for offset in c['evaluation']['diagnostic_offsets']:
         group = [r for r in rank_rows if r['offset'] == offset]

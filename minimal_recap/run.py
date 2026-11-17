@@ -9,8 +9,7 @@ import numpy as np
 import torch
 import yaml
 from .config import load, seed_all, code_version, fingerprint
-from .env import PlanarGraspEnv
-from .expert import Expert
+from .tasks import make_env, make_expert
 from .data import atomic_json, collect_episode, episodes, read_episode, freeze_contract, returns
 from .learning import load_model, Behavior, train, advantages
 from .evaluation import physics_check, evaluate, make_recovery_pool, evaluate_pool, diagnostics
@@ -35,7 +34,7 @@ class Runner:
         c, folder = self.c, self.root/'expert'
         existing = episodes(folder)
         successes = sum(e['metadata']['success'] for e in existing)
-        env = PlanarGraspEnv(c, None)
+        env = make_env(c, None)
         for attempt in range(c['expert_rollout']['max_attempts']):
             if successes >= c['expert_rollout']['successes']:
                 break
@@ -46,7 +45,7 @@ class Runner:
                     continue
             else:
                 old = None
-            expert = Expert(env)
+            expert = make_expert(env)
             ep = collect_episode(env, expert, c['seeds']['expert']+attempt,
                                  {'episode_id': f'expert_{attempt}', 'source': 'expert', 'checkpoint': None,
                                   'control_hz': c['environment']['control_hz'], 'data_version': c['dataset']['version']}, path, old)
@@ -82,9 +81,13 @@ class Runner:
         folder.mkdir(exist_ok=True)
         source = 'bc' if round_id == 0 else f'recap_{round_id}'
         atomic_json(folder/'behavior.json', {'checkpoint': str(checkpoint.relative_to(self.root)), 'checkpoint_sha256': checkpoint_hash, 'exploration': c['policy_rollout']['exploration'],
-                                          'action_processing': 'network tanh, gaussian optional, normalized clip, actual-position delta servo',
+                                          'action_dim': int(model.spec['action_dim']),
+                                          'task': c['environment']['task'],
+                                          'action_processing': 'network tanh, optional Gaussian, normalized clip, actual-position/wrist delta servo, absolute opening with configured physical-substep reference governor',
+                                          'gripper_motion': c['environment'].get('gripper_motion'),
+                                          'grip_kv': c['environment'].get('grip_kv',3),
                                           'frozen_during_collection': True, 'round': round_id})
-        env = PlanarGraspEnv(c, c['policy_rollout']['max_control_steps'], self.contract['failure_cost'])
+        env = make_env(c, c['policy_rollout']['max_control_steps'], self.contract['failure_cost'])
         for i in range(c['policy_rollout']['episodes']):
             path = folder/f'{i:06}.npz'
             old = read_episode(path) if path.exists() else None

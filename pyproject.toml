@@ -16,5 +16,8 @@ video = ["imageio>=2.34", "imageio-ffmpeg>=0.5"]
 [tool.setuptools.packages.find]
 include = ["minimal_recap*"]
 
+[tool.setuptools.package-data]
+minimal_recap = ["dashboard_web/*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

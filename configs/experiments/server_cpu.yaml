@@ -1,7 +1,0 @@
-extends: recap.yaml
-run:
-  name: server_cpu_200
-  stages: [physics, expert, freeze]
-model: {device: cpu}
-expert_rollout:
-  successes: 200

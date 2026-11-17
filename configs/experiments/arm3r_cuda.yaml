@@ -1,0 +1,3 @@
+extends: arm3r.yaml
+run: {name: arm3r_cuda}
+model: {device: cuda}

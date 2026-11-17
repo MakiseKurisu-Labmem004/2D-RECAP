@@ -1,0 +1,15 @@
+127.0.0.1 - - [16/Nov/2026 22:31:47] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [16/Nov/2026 22:31:47] "GET /style.css HTTP/1.1" 200 -
+127.0.0.1 - - [16/Nov/2026 22:31:47] "GET /app.js HTTP/1.1" 200 -
+127.0.0.1 - - [16/Nov/2026 22:31:47] "GET /api/runs? HTTP/1.1" 200 -
+127.0.0.1 - - [16/Nov/2026 22:31:49] "GET /api/run?run=gpu_seed1 HTTP/1.1" 200 -
+127.0.0.1 - - [16/Nov/2026 22:31:49] "GET /api/episodes?run=gpu_seed1&group=rollouts%2Fround_00 HTTP/1.1" 200 -
+127.0.0.1 - - [16/Nov/2026 22:31:49] "GET /api/episode?run=gpu_seed1&path=rollouts%2Fround_00%2F000000.npz HTTP/1.1" 200 -
+127.0.0.1 - - [16/Nov/2026 22:32:22] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [16/Nov/2026 22:32:22] "GET /style.css HTTP/1.1" 200 -
+127.0.0.1 - - [16/Nov/2026 22:32:22] "GET /app.js HTTP/1.1" 200 -
+127.0.0.1 - - [16/Nov/2026 22:32:22] "GET /api/runs? HTTP/1.1" 200 -
+127.0.0.1 - - [16/Nov/2026 22:32:23] "GET /api/run?run=gpu_seed1 HTTP/1.1" 200 -
+127.0.0.1 - - [16/Nov/2026 22:32:23] "GET /api/episodes?run=gpu_seed1&group=rollouts%2Fround_00 HTTP/1.1" 200 -
+127.0.0.1 - - [16/Nov/2026 22:32:23] "GET /api/episode?run=gpu_seed1&path=rollouts%2Fround_00%2F000000.npz HTTP/1.1" 200 -
+127.0.0.1 - - [16/Nov/2026 22:32:39] "GET /api/episode?run=gpu_seed1&path=rollouts%2Fround_00%2F000003.npz HTTP/1.1" 200 -

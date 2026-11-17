@@ -13,7 +13,7 @@ uv pip install --python .venv/bin/python --no-deps -e .
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 .venv/bin/python -m pytest -q
-config="${1:-configs/experiments/server_cpu.yaml}"
+config="${1:-configs/experiments/arm3r.yaml}"
 if (( $# > 0 )); then
     shift
 fi

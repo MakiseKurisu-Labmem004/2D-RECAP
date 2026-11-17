@@ -6,7 +6,7 @@ import numpy as np
 import yaml
 import mujoco
 from .data import read_episode
-from .env import PlanarGraspEnv
+from .tasks import make_env, make_expert
 
 
 def export_video(config, episode, output, stride=1, title=None):
@@ -17,7 +17,7 @@ def export_video(config, episode, output, stride=1, title=None):
     if output.suffix.lower() not in ['.gif', '.mp4']:
         raise ValueError('Output must end in .gif or .mp4')
     output.parent.mkdir(parents=True, exist_ok=True)
-    env = PlanarGraspEnv(config)
+    env = make_env(config)
     env.restore(episode['states'][0])
     fps = config['environment']['control_hz']/stride
     indices = list(range(0, len(episode['states']), stride))
@@ -70,7 +70,7 @@ def main():
         print(export_video(c, ep, args.output, args.stride, args.title))
     else:
         from mujoco import viewer as mj_viewer
-        env = PlanarGraspEnv(c)
+        env = make_env(c)
         env.restore(ep['states'][0])
         try:
             with mj_viewer.launch_passive(env.model, env.data) as viewer:

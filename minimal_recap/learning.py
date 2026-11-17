@@ -16,11 +16,11 @@ def mlp(dim, out, c):
 
 
 class Network(nn.Module):
-    def __init__(self, dim, c, kind='policy', conditional=False, support=None):
+    def __init__(self, dim, c, kind='policy', conditional=False, support=None, action_dim=4):
         super().__init__()
-        self.spec = dict(dim=dim, c=c, kind=kind, conditional=conditional, support=support)
+        self.spec = dict(dim=dim, c=c, kind=kind, conditional=conditional, support=support, action_dim=action_dim)
         self.kind, self.conditional = kind, conditional
-        self.net = mlp(dim+int(conditional), 3 if kind == 'policy' else c['value_bins'], c)
+        self.net = mlp(dim+int(conditional), action_dim if kind == 'policy' else c['value_bins'], c)
         self.register_buffer('mean', torch.zeros(dim))
         self.register_buffer('scale', torch.ones(dim))
         self.register_buffer('support', torch.tensor([] if support is None else np.linspace(*support, c['value_bins']), dtype=torch.float32))
@@ -72,7 +72,7 @@ class Behavior:
         a = self.model(torch.tensor(obs, dtype=torch.float32)).cpu().numpy()
         mode = self.exploration['mode']
         if mode == 'gaussian':
-            a += self.rng.normal(0, self.exploration['std'], 3)
+            a += self.rng.normal(0, self.exploration['std'], a.shape)
         elif mode != 'none':
             raise ValueError('Unknown exploration rule')
         return np.clip(a, -1, 1).astype(np.float32)
@@ -130,7 +130,7 @@ def train(c, eps, output, kind, contract=None, initial=None, experts=None, label
         return np.concatenate([e[key] for e in items])
     obs, val_obs = stack(tr, 'observation'), stack(va, 'observation')
     model = Network(obs.shape[1], c['model'], 'value' if kind == 'value' else 'policy', conditional,
-                    contract['support'] if kind == 'value' else None)
+                    contract['support'] if kind == 'value' else None, action_dim=stack(tr, 'action').shape[1])
     model.normalize(obs, c['observation']['normalize'])
     if initial is not None:
         # Keep BC statistics fixed when warm starting policy updates.
